@@ -1,5 +1,5 @@
 name: astrbot_plugin_sky
-description: 光遇(Sky: Children of the Light)游戏助手插件，支持自然语言查询每日任务、光翼位置、蜡烛记录等功能
+description: "光遇(Sky: Children of the Light)游戏助手插件，支持自然语言查询每日任务、光翼位置、服务器状态等功能"
 author: AstrBot Community
 version: 1.0.0
 repo: https://github.com/AstrBot-Devs/astrbot_plugin_sky
