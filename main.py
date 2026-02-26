@@ -7,22 +7,16 @@ import asyncio
 import json
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import aiohttp
-from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api import AstrBotConfig, logger
 
 
-@register(
-    name="astrbot_plugin_sky",
-    desc="光遇游戏助手 - 支持自然语言查询每日任务、光翼查询、服务器状态等",
-    version="1.0.0",
-    author="AstrBot Community"
-)
 class SkyPlugin(Star):
     """光遇游戏助手插件"""
     
@@ -32,6 +26,9 @@ class SkyPlugin(Star):
     WING_API = "https://s.166.net/config/ds_yy_02/ma75_wing_wings.json"
     WING_QUERY_API = "https://ovoav.com/api/sky/gycx/gka"
     SERVER_STATUS_API = "https://live-queue-sky-merge.game.163.com/queue?type=json"
+    
+    # 北京时间时区
+    BEIJING_TZ = timezone(timedelta(hours=8))
     
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -64,6 +61,9 @@ class SkyPlugin(Star):
         plugin_data_dir = StarTools.get_data_dir()
         self.sky_bindings_dir = plugin_data_dir / "sky_bindings"
         self.sky_bindings_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 文件写入锁，防止并发写入导致数据损坏
+        self._file_lock = asyncio.Lock()
         
         # 共享的 ClientSession
         self._session: Optional[aiohttp.ClientSession] = None
@@ -112,43 +112,45 @@ class SkyPlugin(Star):
         """获取用户光遇ID绑定文件路径"""
         return self.sky_bindings_dir / f"{user_id}.json"
     
-    def _load_json(self, file_path: Path, default: Optional[dict] = None) -> dict:
-        """加载JSON文件"""
+    async def _load_json(self, file_path: Path, default: Optional[dict] = None) -> dict:
+        """加载JSON文件（异步安全）"""
         if default is None:
             default = {}
         try:
             if file_path.exists():
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                async with self._file_lock:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        return json.load(f)
         except Exception as e:
             logger.error(f"加载JSON文件失败 {file_path}: {e}")
         return default
     
-    def _save_json(self, file_path: Path, data: dict):
-        """保存JSON文件"""
+    async def _save_json(self, file_path: Path, data: dict):
+        """保存JSON文件（异步安全，带锁保护）"""
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            async with self._file_lock:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存JSON文件失败 {file_path}: {e}")
     
-    def _get_user_sky_data(self, user_id: str) -> dict:
+    async def _get_user_sky_data(self, user_id: str) -> dict:
         """获取用户光遇ID绑定数据"""
         file_path = self._get_sky_binding_file(user_id)
-        data = self._load_json(file_path)
+        data = await self._load_json(file_path)
         if not data:
             data = {
                 "user_id": user_id,
                 "ids": [],
                 "current_id": None
             }
-            self._save_json(file_path, data)
+            await self._save_json(file_path, data)
         return data
     
-    def _save_user_sky_data(self, user_id: str, data: dict):
+    async def _save_user_sky_data(self, user_id: str, data: dict):
         """保存用户光遇ID绑定数据"""
         file_path = self._get_sky_binding_file(user_id)
-        self._save_json(file_path, data)
+        await self._save_json(file_path, data)
     
     # ==================== 缓存操作 ====================
     
@@ -190,11 +192,17 @@ class SkyPlugin(Star):
             logger.error(f"获取数据失败 ({url}): {e}")
         return None
     
+    # ==================== 时间工具 ====================
+    
+    def _get_beijing_time(self) -> datetime:
+        """获取北京时间"""
+        return datetime.now(self.BEIJING_TZ)
+    
     # ==================== 核心逻辑方法 ====================
     
     async def _get_debris_info_data(self) -> Dict:
         """获取碎石信息数据"""
-        now = datetime.now()
+        now = self._get_beijing_time()
         day = now.day
         day_of_week = now.weekday()
         
@@ -253,7 +261,7 @@ class SkyPlugin(Star):
         url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/GameProgress.json"
         return await self._fetch_json(url, use_cache=True, cache_key="season_progress")
     
-    def _format_season_result(self, data: Dict) -> str:
+    def _format_season_result(self, data: Optional[Dict]) -> str:
         """格式化季节进度结果"""
         if not data:
             return "❌ 获取季节信息失败，请稍后重试"
@@ -265,18 +273,30 @@ class SkyPlugin(Star):
         required_true = season.get("requiredCandlesTrue", 0)
         required_false = season.get("requiredCandlesFalse", 0)
         
-        now = datetime.now()
-        days = 0
+        now = self._get_beijing_time()
+        
         if end_date:
             date_part = end_date.split()[0]
-            end = datetime.strptime(date_part.replace("-", "/"), "%Y/%m/%d")
-            diff = end - now
-            days = diff.days
-            hours = diff.seconds // 3600
-            minutes = (diff.seconds % 3600) // 60
-            remaining = f"{days}天{hours}时{minutes}分" if days > 0 else f"{hours}时{minutes}分"
+            try:
+                end = datetime.strptime(date_part.replace("-", "/"), "%Y/%m/%d")
+                end = end.replace(tzinfo=self.BEIJING_TZ)
+                diff = end - now
+                
+                # 检查是否已结束
+                if diff.total_seconds() <= 0:
+                    remaining = "已结束"
+                    days = 0
+                else:
+                    days = diff.days
+                    hours = diff.seconds // 3600
+                    minutes = (diff.seconds % 3600) // 60
+                    remaining = f"{days}天{hours}时{minutes}分" if days > 0 else f"{hours}时{minutes}分"
+            except ValueError:
+                remaining = "未知"
+                days = 0
         else:
             remaining = "未知"
+            days = 0
         
         result = f"🌸 当前季节: {season_name}\n"
         if start_date:
@@ -302,7 +322,7 @@ class SkyPlugin(Star):
         if not records:
             return None
         
-        now = datetime.now()
+        now = self._get_beijing_time()
         current_year = now.year
         
         year_data = None
@@ -318,7 +338,12 @@ class SkyPlugin(Star):
         if not year_record:
             return None
         
-        latest_month = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)[0]
+        # 按月份排序，获取最新月份
+        sorted_months = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)
+        if not sorted_months:
+            return None
+        
+        latest_month = sorted_months[0]
         month_record = latest_month.get("monthRecord", [])
         
         if not month_record:
@@ -563,7 +588,7 @@ class SkyPlugin(Star):
     async def bind_sky_id(self, event: AstrMessageEvent, sky_id: str):
         """绑定光遇ID"""
         user_id = event.get_sender_id()
-        user_data = self._get_user_sky_data(user_id)
+        user_data = await self._get_user_sky_data(user_id)
         
         if sky_id in user_data["ids"]:
             yield event.plain_result(f"⚠️ ID {sky_id} 已经绑定过了！")
@@ -573,14 +598,14 @@ class SkyPlugin(Star):
         if not user_data["current_id"]:
             user_data["current_id"] = sky_id
         
-        self._save_user_sky_data(user_id, user_data)
+        await self._save_user_sky_data(user_id, user_data)
         yield event.plain_result(f"✅ 绑定成功！当前ID: {sky_id}\n\n💡 使用「光翼查询」查询该ID的光翼信息")
     
     @filter.command("光遇切换")
     async def switch_sky_id(self, event: AstrMessageEvent, index: int):
         """切换当前光遇ID"""
         user_id = event.get_sender_id()
-        user_data = self._get_user_sky_data(user_id)
+        user_data = await self._get_user_sky_data(user_id)
         
         if not user_data["ids"]:
             yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定")
@@ -591,14 +616,14 @@ class SkyPlugin(Star):
             return
         
         user_data["current_id"] = user_data["ids"][index - 1]
-        self._save_user_sky_data(user_id, user_data)
+        await self._save_user_sky_data(user_id, user_data)
         yield event.plain_result(f"✅ 已切换到ID: {user_data['current_id']}")
     
     @filter.command("光遇删除")
     async def delete_sky_id(self, event: AstrMessageEvent, index: int):
         """删除绑定的光遇ID"""
         user_id = event.get_sender_id()
-        user_data = self._get_user_sky_data(user_id)
+        user_data = await self._get_user_sky_data(user_id)
         
         if not user_data["ids"]:
             yield event.plain_result("⚠️ 您还没有绑定任何ID！")
@@ -612,14 +637,14 @@ class SkyPlugin(Star):
         if user_data["current_id"] == deleted_id:
             user_data["current_id"] = user_data["ids"][0] if user_data["ids"] else None
         
-        self._save_user_sky_data(user_id, user_data)
+        await self._save_user_sky_data(user_id, user_data)
         yield event.plain_result(f"✅ 已删除ID: {deleted_id}")
     
     @filter.command("光遇ID列表")
     async def list_sky_ids(self, event: AstrMessageEvent):
         """列出所有绑定的光遇ID"""
         user_id = event.get_sender_id()
-        user_data = self._get_user_sky_data(user_id)
+        user_data = await self._get_user_sky_data(user_id)
         
         if not user_data["ids"]:
             yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定\n\n💡 Tips：这里需要绑定游戏内短ID哦")
@@ -640,7 +665,7 @@ class SkyPlugin(Star):
         user_id = event.get_sender_id()
         
         if sky_id is None:
-            user_data = self._get_user_sky_data(user_id)
+            user_data = await self._get_user_sky_data(user_id)
             sky_id = user_data.get("current_id")
             if not sky_id:
                 if not user_data["ids"]:
@@ -793,7 +818,7 @@ class SkyPlugin(Star):
         """定时任务调度器"""
         while self._running:
             try:
-                now = datetime.now()
+                now = self._get_beijing_time()
                 current_time = now.strftime("%H:%M")
                 current_minute = now.minute
                 
@@ -838,7 +863,7 @@ class SkyPlugin(Star):
     async def _check_grandma_reminder(self):
         """检查老奶奶用餐提醒"""
         grandma_hours = [8, 10, 12, 16, 18, 20]
-        current_hour = datetime.now().hour
+        current_hour = self._get_beijing_time().hour
         
         if current_hour in grandma_hours:
             if not self.push_groups:
