@@ -1,5 +1,5 @@
 name: astrbot_plugin_sky
-description:"这是一个为光遇玩家打造的智能助手插件。（移植于Yunzai-bot的Tlon-Sky插件，并加入LLM大模型调用）
+description: "这是一个为光遇玩家打造的智能助手插件。（移植于Yunzai-bot的Tlon-Sky插件，并加入LLM大模型调用）
 
 无论你是想了解今日任务、查询光翼收集进度，还是想知道服务器排队情况——只需在QQ发送一条消息，即可快速获取光遇游戏相关信息。
 
