@@ -1,0 +1,60 @@
+{
+  "llm_provider_id": {
+    "type": "string",
+    "description": "LLM Provider ID（用于自然语言交互）",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "选择用于光遇插件自然语言交互的 LLM Provider。留空则使用当前会话的默认 Provider"
+  },
+  "enable_daily_task_push": {
+    "type": "bool",
+    "description": "启用每日任务推送",
+    "default": true,
+    "hint": "是否每天自动推送光遇每日任务图片"
+  },
+  "daily_task_push_time": {
+    "type": "string",
+    "description": "每日任务推送时间",
+    "default": "08:00",
+    "hint": "每日任务自动推送的时间，格式：HH:MM"
+  },
+  "push_groups": {
+    "type": "list",
+    "description": "推送群组列表",
+    "default": [],
+    "hint": "需要接收定时推送的群组ID列表（UMO格式，如 aiocqhttp:GroupMessage:123456）",
+    "items": {
+      "type": "string"
+    }
+  },
+  "enable_grandma_reminder": {
+    "type": "bool",
+    "description": "启用老奶奶干饭提醒",
+    "default": true,
+    "hint": "是否在老奶奶用餐时间发送提醒"
+  },
+  "enable_sacrifice_reminder": {
+    "type": "bool",
+    "description": "启用献祭刷新提醒",
+    "default": true,
+    "hint": "是否在献祭刷新时发送提醒"
+  },
+  "enable_debris_reminder": {
+    "type": "bool",
+    "description": "启用碎石提醒",
+    "default": true,
+    "hint": "是否提醒每日碎石位置"
+  },
+  "api_timeout": {
+    "type": "int",
+    "description": "API请求超时时间（秒）",
+    "default": 10,
+    "hint": "请求光遇数据API的超时时间"
+  },
+  "cache_duration": {
+    "type": "int",
+    "description": "数据缓存时间（分钟）",
+    "default": 30,
+    "hint": "光遇数据的缓存时间"
+  }
+}
