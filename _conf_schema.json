@@ -1,4 +1,16 @@
 {
+  "sky_api_key": {
+    "type": "string",
+    "description": "光遇API密钥（用于获取任务/蜡烛图片）",
+    "default": "qw36BL4Oiq8Kmpefl3bkpIs5IY",
+    "hint": "光遇数据API密钥，用于获取每日任务、季节蜡烛、大蜡烛等图片"
+  },
+  "wing_query_key": {
+    "type": "string",
+    "description": "光翼查询API密钥",
+    "default": "IIoAMkBC5c5zl",
+    "hint": "光翼查询API密钥，用于查询玩家光翼收集进度"
+  },
   "llm_provider_id": {
     "type": "string",
     "description": "LLM Provider ID（用于自然语言交互）",

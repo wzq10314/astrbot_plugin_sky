@@ -5,14 +5,14 @@ API来源: https://gitee.com/Tloml-Starry/Tlon-Sky
 """
 import asyncio
 import json
-import os
-import time
 import random
+import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import aiohttp
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api import AstrBotConfig, logger
 
@@ -26,8 +26,7 @@ from astrbot.api import AstrBotConfig, logger
 class SkyPlugin(Star):
     """光遇游戏助手插件"""
     
-    # 光遇数据API
-    SKY_API_KEY = "qw36BL4Oiq8Kmpefl3bkpIs5IY"
+    # API 基础地址
     SKY_API_BASE = "https://api.t1qq.com/api/sky"
     RESOURCES_BASE = "https://ghfast.top/https://raw.githubusercontent.com/A-Kevin1217/resources/master/resources"
     WING_API = "https://s.166.net/config/ds_yy_02/ma75_wing_wings.json"
@@ -37,6 +36,10 @@ class SkyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        
+        # 从配置读取 API Key
+        self.sky_api_key = config.get("sky_api_key", "")
+        self.wing_query_key = config.get("wing_query_key", "")
         
         # LLM配置
         self.llm_provider_id = config.get("llm_provider_id", "")
@@ -54,47 +57,74 @@ class SkyPlugin(Star):
         self.cache_duration = config.get("cache_duration", 30)
         
         # 数据缓存
-        self._cache = {}
-        self._cache_time = {}
+        self._cache: Dict[str, Dict] = {}
+        self._cache_time: Dict[str, float] = {}
         
-        # 数据目录
-        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
-        self.sky_bindings_dir = os.path.join(self.data_dir, "sky_bindings")
+        # 使用 StarTools 获取数据目录
+        plugin_data_dir = StarTools.get_data_dir()
+        self.sky_bindings_dir = plugin_data_dir / "sky_bindings"
+        self.sky_bindings_dir.mkdir(parents=True, exist_ok=True)
         
-        # 确保数据目录存在
-        os.makedirs(self.sky_bindings_dir, exist_ok=True)
+        # 共享的 ClientSession
+        self._session: Optional[aiohttp.ClientSession] = None
         
         # 定时任务
-        self._scheduler_task = None
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._running = False
         
         logger.info("光遇插件已加载")
     
     async def initialize(self):
         """插件激活时自动调用"""
+        # 创建共享的 ClientSession
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self.api_timeout)
+        )
+        self._running = True
+        
         # 启动定时任务调度器
         if self.enable_daily_task_push or self.enable_grandma_reminder:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
             logger.info("光遇定时任务调度器已启动")
     
+    async def terminate(self):
+        """插件终止时调用"""
+        self._running = False
+        
+        # 取消定时任务
+        if self._scheduler_task:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+        
+        # 关闭 ClientSession
+        if self._session:
+            await self._session.close()
+            self._session = None
+        
+        logger.info("光遇插件已终止")
+    
     # ==================== 数据文件操作 ====================
     
-    def _get_sky_binding_file(self, user_id: str) -> str:
+    def _get_sky_binding_file(self, user_id: str) -> Path:
         """获取用户光遇ID绑定文件路径"""
-        return os.path.join(self.sky_bindings_dir, f"{user_id}.json")
+        return self.sky_bindings_dir / f"{user_id}.json"
     
-    def _load_json(self, file_path: str, default: dict = None) -> dict:
+    def _load_json(self, file_path: Path, default: Optional[dict] = None) -> dict:
         """加载JSON文件"""
         if default is None:
             default = {}
         try:
-            if os.path.exists(file_path):
+            if file_path.exists():
                 with open(file_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception as e:
             logger.error(f"加载JSON文件失败 {file_path}: {e}")
         return default
     
-    def _save_json(self, file_path: str, data: dict):
+    def _save_json(self, file_path: Path, data: dict):
         """保存JSON文件"""
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -137,141 +167,45 @@ class SkyPlugin(Star):
     
     # ==================== API请求 ====================
     
-    async def _fetch_json(self, url: str) -> Optional[Dict]:
+    async def _fetch_json(self, url: str, use_cache: bool = True, cache_key: Optional[str] = None) -> Optional[Dict]:
         """从URL获取JSON数据"""
+        # 检查缓存
+        if use_cache and cache_key:
+            cached = self._get_cache(cache_key)
+            if cached is not None:
+                return cached
+        
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=self.api_timeout)
-                ) as resp:
-                    if resp.status == 200:
-                        # 先获取文本，再手动解析JSON，避免content-type检查问题
-                        text = await resp.text()
-                        return json.loads(text)
+            if self._session is None:
+                return None
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    data = json.loads(text)
+                    # 设置缓存
+                    if use_cache and cache_key:
+                        self._set_cache(cache_key, data)
+                    return data
         except Exception as e:
             logger.error(f"获取数据失败 ({url}): {e}")
         return None
     
-    # ==================== LLM工具函数 ====================
+    # ==================== 核心逻辑方法 ====================
     
-    @filter.llm_tool(name="get_sky_daily_tasks")
-    async def tool_get_daily_tasks(self, event: AstrMessageEvent):
-        '''获取光遇今日每日任务图片
-        
-        当用户询问"今天有什么任务"、"每日任务是什么"、"光遇任务"时使用此工具。
-        '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.SKY_API_KEY}&num={rand}"
-        yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(image_url)
-    
-    @filter.llm_tool(name="get_sky_season_candles")
-    async def tool_get_season_candles(self, event: AstrMessageEvent):
-        '''获取光遇季节蜡烛位置图片
-        
-        当用户询问"季节蜡烛在哪里"、"季蜡位置"、"季节蜡烛"时使用此工具。
-        '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scjl?key={self.SKY_API_KEY}&num={rand}"
-        yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(image_url)
-    
-    @filter.llm_tool(name="get_sky_big_candles")
-    async def tool_get_big_candles(self, event: AstrMessageEvent):
-        '''获取光遇大蜡烛位置图片
-        
-        当用户询问"大蜡烛在哪里"、"大蜡位置"、"大蜡烛"时使用此工具。
-        '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scdl?key={self.SKY_API_KEY}&num={rand}"
-        yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(image_url)
-    
-    @filter.llm_tool(name="get_sky_free_magic")
-    async def tool_get_free_magic(self, event: AstrMessageEvent):
-        '''获取光遇免费魔法图片
-        
-        当用户询问"今天有什么魔法"、"免费魔法"、"魔法"时使用此工具。
-        '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/mf/magic?key={self.SKY_API_KEY}&num={rand}"
-        yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(image_url)
-    
-    @filter.llm_tool(name="get_sky_season_progress")
-    async def tool_get_season_progress(self, event: AstrMessageEvent):
-        '''获取当前季节进度信息
-        
-        当用户询问"现在是什么季节"、"季节还有多久结束"、"季节进度"时使用此工具。
-        '''
-        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/GameProgress.json"
-        data = await self._fetch_json(url)
-        
-        if not data:
-            yield event.plain_result("❌ 获取季节信息失败，请稍后重试")
-            return
-        
-        season = data.get("season", {})
-        season_name = season.get("name", "未知季节")
-        start_date = season.get("startDate", "")
-        end_date = season.get("endDate", "")
-        required_true = season.get("requiredCandlesTrue", 0)
-        required_false = season.get("requiredCandlesFalse", 0)
-        
-        # 计算剩余时间
-        now = datetime.now()
-        days = 0
-        if end_date:
-            # 处理可能包含时间部分的日期格式
-            date_part = end_date.split()[0]  # 只取日期部分
-            end = datetime.strptime(date_part.replace("-", "/"), "%Y/%m/%d")
-            diff = end - now
-            days = diff.days
-            hours = diff.seconds // 3600
-            minutes = (diff.seconds % 3600) // 60
-            remaining = f"{days}天{hours}时{minutes}分" if days > 0 else f"{hours}时{minutes}分"
-        else:
-            remaining = "未知"
-        
-        result = f"🌸 当前季节: {season_name}\n"
-        if start_date:
-            result += f"📅 开始时间: {start_date}\n"
-        if end_date:
-            result += f"📅 结束时间: {end_date}\n"
-        result += f"⏰ 剩余时间: {remaining}\n"
-        
-        # 毕业所需天数
-        if days > 0:
-            days_with = (required_true + 5) // 6
-            days_without = (required_false + 4) // 5
-            result += f"\n📊 毕业所需天数:\n"
-            result += f"   有季卡: 约{days_with}天 ({required_true}根季节蜡烛)\n"
-            result += f"   无季卡: 约{days_without}天 ({required_false}根季节蜡烛)"
-        
-        yield event.plain_result(result)
-    
-    @filter.llm_tool(name="get_sky_debris_info")
-    async def tool_get_debris_info(self, event: AstrMessageEvent):
-        '''获取今日碎石信息
-        
-        当用户询问"今天碎石在哪里"、"碎石是什么类型"、"碎石"时使用此工具。
-        '''
+    async def _get_debris_info_data(self) -> Dict:
+        """获取碎石信息数据"""
         now = datetime.now()
         day = now.day
         day_of_week = now.weekday()
         
-        # 碎石规律
         is_first_half = day <= 15
         valid_days = [2, 6, 0] if is_first_half else [3, 5, 0]
         
         if day_of_week not in valid_days:
-            yield event.plain_result("💎 今日碎石信息\n\n今日无碎石")
-            return
+            return {"has_debris": False}
         
         maps = ["暮土", "禁阁", "云野", "雨林", "霞谷"]
-        map_index = (day - 1) % len(maps)
-        map_name = maps[map_index]
+        map_name = maps[(day - 1) % len(maps)]
         
         if day_of_week == 0:
             debris_type = "红石" if is_first_half else "黑石"
@@ -290,17 +224,265 @@ class SkyPlugin(Star):
         
         location = locations.get(map_name, {}).get(day_of_week, "未知位置")
         
+        return {
+            "has_debris": True,
+            "map_name": map_name,
+            "location": location,
+            "debris_type": debris_type
+        }
+    
+    def _format_debris_result(self, data: Dict) -> str:
+        """格式化碎石信息结果"""
+        if not data.get("has_debris"):
+            return "💎 今日碎石信息\n\n今日无碎石"
+        
         result = f"💎 今日碎石信息\n\n"
-        result += f"📍 地图: {map_name}\n"
-        result += f"📍 位置: {location}\n"
-        result += f"🔷 类型: {debris_type}\n\n"
+        result += f"📍 地图: {data['map_name']}\n"
+        result += f"📍 位置: {data['location']}\n"
+        result += f"🔷 类型: {data['debris_type']}\n\n"
         result += f"⏰ 坠落时间:\n"
         result += f"   • 07:08 (持续约50分钟)\n"
         result += f"   • 13:08 (持续约50分钟)\n"
         result += f"   • 19:08 (持续约50分钟)\n\n"
         result += f"🎁 奖励: 升华蜡烛\n"
         result += f"💡 完成碎石任务可以获得升华蜡烛奖励"
+        return result
+    
+    async def _get_season_progress_data(self) -> Optional[Dict]:
+        """获取季节进度数据"""
+        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/GameProgress.json"
+        return await self._fetch_json(url, use_cache=True, cache_key="season_progress")
+    
+    def _format_season_result(self, data: Dict) -> str:
+        """格式化季节进度结果"""
+        if not data:
+            return "❌ 获取季节信息失败，请稍后重试"
         
+        season = data.get("season", {})
+        season_name = season.get("name", "未知季节")
+        start_date = season.get("startDate", "")
+        end_date = season.get("endDate", "")
+        required_true = season.get("requiredCandlesTrue", 0)
+        required_false = season.get("requiredCandlesFalse", 0)
+        
+        now = datetime.now()
+        days = 0
+        if end_date:
+            date_part = end_date.split()[0]
+            end = datetime.strptime(date_part.replace("-", "/"), "%Y/%m/%d")
+            diff = end - now
+            days = diff.days
+            hours = diff.seconds // 3600
+            minutes = (diff.seconds % 3600) // 60
+            remaining = f"{days}天{hours}时{minutes}分" if days > 0 else f"{hours}时{minutes}分"
+        else:
+            remaining = "未知"
+        
+        result = f"🌸 当前季节: {season_name}\n"
+        if start_date:
+            result += f"📅 开始时间: {start_date}\n"
+        if end_date:
+            result += f"📅 结束时间: {end_date}\n"
+        result += f"⏰ 剩余时间: {remaining}\n"
+        
+        if days > 0:
+            days_with = (required_true + 5) // 6
+            days_without = (required_false + 4) // 5
+            result += f"\n📊 毕业所需天数:\n"
+            result += f"   有季卡: 约{days_with}天 ({required_true}根季节蜡烛)\n"
+            result += f"   无季卡: 约{days_without}天 ({required_false}根季节蜡烛)"
+        
+        return result
+    
+    async def _get_traveling_spirit_data(self) -> Optional[Dict]:
+        """获取复刻先祖数据"""
+        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/RegressionRecords.json"
+        records = await self._fetch_json(url, use_cache=True, cache_key="traveling_spirit")
+        
+        if not records:
+            return None
+        
+        now = datetime.now()
+        current_year = now.year
+        
+        year_data = None
+        for record in records:
+            if record.get("year") == current_year:
+                year_data = record
+                break
+        
+        if not year_data:
+            return None
+        
+        year_record = year_data.get("yearRecord", [])
+        if not year_record:
+            return None
+        
+        latest_month = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)[0]
+        month_record = latest_month.get("monthRecord", [])
+        
+        if not month_record:
+            return None
+        
+        latest = month_record[-1]
+        return {
+            "spirit_name": latest.get("name", "未知先祖"),
+            "spirit_day": latest.get("day", 0),
+            "month": latest_month.get("month", 0),
+            "year": current_year
+        }
+    
+    def _format_traveling_spirit_result(self, data: Optional[Dict]) -> str:
+        """格式化复刻先祖结果"""
+        if not data:
+            return "暂无复刻数据"
+        
+        result = f"🎭 当前复刻先祖: {data['spirit_name']}\n\n"
+        result += f"📅 到达时间: {data['year']}年{data['month']}月{data['spirit_day']}日\n"
+        result += f"⏰ 停留时间: 约4天\n\n"
+        result += f"💡 发送「复刻兑换图」查看兑换物品详情"
+        return result
+    
+    async def _get_server_status_data(self) -> Optional[Dict]:
+        """获取服务器状态数据"""
+        return await self._fetch_json(self.SERVER_STATUS_API, use_cache=False)
+    
+    def _format_server_status_result(self, data: Optional[Dict]) -> str:
+        """格式化服务器状态结果"""
+        if data is None:
+            return "❌ 获取服务器状态失败，可能正在维护更新"
+        
+        ret = data.get("ret", 0)
+        pos = data.get("pos", 0)
+        wait_time = data.get("wait_time", 0)
+        
+        if ret != 1:
+            return "✅ 当前光遇服务器畅通，无需排队"
+        
+        hours = wait_time // 3600
+        minutes = (wait_time % 3600) // 60
+        seconds = wait_time % 60
+        
+        if hours > 0:
+            time_display = f"{hours}时{minutes}分{seconds}秒"
+        elif minutes > 0:
+            time_display = f"{minutes}分{seconds}秒"
+        else:
+            time_display = f"{seconds}秒"
+        
+        result = f"⏳ 当前光遇服务器排队中\n\n"
+        result += f"👥 排队人数: {pos}位\n"
+        result += f"⏰ 预计等待时间: {time_display}"
+        return result
+    
+    async def _get_wing_count_data(self) -> Optional[List]:
+        """获取光翼统计数据"""
+        return await self._fetch_json(self.WING_API, use_cache=True, cache_key="wing_count")
+    
+    def _format_wing_count_result(self, data: Optional[List]) -> str:
+        """格式化光翼统计结果"""
+        if not data:
+            return "❌ 获取光翼数据失败，请稍后重试"
+        
+        category_map = {
+            "晨岛": "晨",
+            "云野": "云",
+            "雨林": "雨",
+            "霞谷": "霞",
+            "暮土": "暮",
+            "禁阁": "禁",
+            "暴风眼": "暴",
+            "复刻永久": "复刻永久",
+            "普通永久": "普通永久"
+        }
+        
+        counts = {v: 0 for v in category_map.values()}
+        
+        for item in data:
+            key = category_map.get(item.get("一级标签", ""))
+            if key:
+                counts[key] += 1
+        
+        reissue = counts.get("复刻永久", 0)
+        normal = counts.get("普通永久", 0)
+        
+        result = f"🪽 光遇全图光翼统计\n\n"
+        result += f"📊 总光翼数量: {len(data)}\n"
+        result += f"   永久翼: {reissue + normal}个\n"
+        result += f"   (复刻先祖: {reissue}个, 常驻先祖: {normal}个)\n\n"
+        
+        result += "📍 各图光翼数量:\n"
+        for map_name, key in category_map.items():
+            if key not in ["复刻永久", "普通永久"]:
+                result += f"   {map_name}: {counts[key]}个\n"
+        
+        result += "\n💡 数据来源: 网易大神"
+        return result
+    
+    # ==================== LLM工具函数 ====================
+    
+    @filter.llm_tool(name="get_sky_daily_tasks")
+    async def tool_get_daily_tasks(self, event: AstrMessageEvent):
+        '''获取光遇今日每日任务图片
+        
+        当用户询问"今天有什么任务"、"每日任务是什么"、"光遇任务"时使用此工具。
+        '''
+        rand = random.randint(0, 1000000)
+        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
+        yield event.plain_result("🌟 光遇今日每日任务")
+        yield event.image_result(image_url)
+    
+    @filter.llm_tool(name="get_sky_season_candles")
+    async def tool_get_season_candles(self, event: AstrMessageEvent):
+        '''获取光遇季节蜡烛位置图片
+        
+        当用户询问"季节蜡烛在哪里"、"季蜡位置"、"季节蜡烛"时使用此工具。
+        '''
+        rand = random.randint(0, 1000000)
+        image_url = f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
+        yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
+        yield event.image_result(image_url)
+    
+    @filter.llm_tool(name="get_sky_big_candles")
+    async def tool_get_big_candles(self, event: AstrMessageEvent):
+        '''获取光遇大蜡烛位置图片
+        
+        当用户询问"大蜡烛在哪里"、"大蜡位置"、"大蜡烛"时使用此工具。
+        '''
+        rand = random.randint(0, 1000000)
+        image_url = f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
+        yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
+        yield event.image_result(image_url)
+    
+    @filter.llm_tool(name="get_sky_free_magic")
+    async def tool_get_free_magic(self, event: AstrMessageEvent):
+        '''获取光遇免费魔法图片
+        
+        当用户询问"今天有什么魔法"、"免费魔法"、"魔法"时使用此工具。
+        '''
+        rand = random.randint(0, 1000000)
+        image_url = f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
+        yield event.plain_result("✨ 光遇今日免费魔法")
+        yield event.image_result(image_url)
+    
+    @filter.llm_tool(name="get_sky_season_progress")
+    async def tool_get_season_progress(self, event: AstrMessageEvent):
+        '''获取当前季节进度信息
+        
+        当用户询问"现在是什么季节"、"季节还有多久结束"、"季节进度"时使用此工具。
+        '''
+        data = await self._get_season_progress_data()
+        result = self._format_season_result(data)
+        yield event.plain_result(result)
+    
+    @filter.llm_tool(name="get_sky_debris_info")
+    async def tool_get_debris_info(self, event: AstrMessageEvent):
+        '''获取今日碎石信息
+        
+        当用户询问"今天碎石在哪里"、"碎石是什么类型"、"碎石"时使用此工具。
+        '''
+        data = await self._get_debris_info_data()
+        result = self._format_debris_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_traveling_spirit")
@@ -309,49 +491,8 @@ class SkyPlugin(Star):
         
         当用户询问"复刻先祖是谁"、"复刻有什么物品"、"复刻"时使用此工具。
         '''
-        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/RegressionRecords.json"
-        records = await self._fetch_json(url)
-        
-        if not records:
-            yield event.plain_result("❌ 获取复刻信息失败，请稍后重试")
-            return
-        
-        now = datetime.now()
-        current_year = now.year
-        
-        # 找到当年数据
-        year_data = None
-        for record in records:
-            if record.get("year") == current_year:
-                year_data = record
-                break
-        
-        if not year_data:
-            yield event.plain_result("暂无今年复刻数据")
-            return
-        
-        year_record = year_data.get("yearRecord", [])
-        if not year_record:
-            yield event.plain_result("暂无复刻数据")
-            return
-        
-        # 找最新月份
-        latest_month = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)[0]
-        month_record = latest_month.get("monthRecord", [])
-        
-        if not month_record:
-            yield event.plain_result("暂无复刻数据")
-            return
-        
-        latest = month_record[-1]
-        spirit_name = latest.get("name", "未知先祖")
-        spirit_day = latest.get("day", 0)
-        
-        result = f"🎭 当前复刻先祖: {spirit_name}\n\n"
-        result += f"📅 到达时间: {current_year}年{latest_month.get('month', 0)}月{spirit_day}日\n"
-        result += f"⏰ 停留时间: 约4天\n\n"
-        result += f"💡 发送「复刻兑换图」查看兑换物品详情"
-        
+        data = await self._get_traveling_spirit_data()
+        result = self._format_traveling_spirit_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_sacrifice_info")
@@ -402,46 +543,8 @@ class SkyPlugin(Star):
         
         当用户询问"光翼有多少个"、"全图光翼"、"光翼统计"时使用此工具。
         '''
-        data = await self._fetch_json(self.WING_API)
-        
-        if not data:
-            yield event.plain_result("❌ 获取光翼数据失败，请稍后重试")
-            return
-        
-        # 分类统计
-        category_map = {
-            "晨岛": "晨",
-            "云野": "云",
-            "雨林": "雨",
-            "霞谷": "霞",
-            "暮土": "暮",
-            "禁阁": "禁",
-            "暴风眼": "暴",
-            "复刻永久": "复刻永久",
-            "普通永久": "普通永久"
-        }
-        
-        counts = {v: 0 for v in category_map.values()}
-        
-        for item in data:
-            key = category_map.get(item.get("一级标签", ""))
-            if key:
-                counts[key] += 1
-        
-        reissue = counts.get("复刻永久", 0)
-        normal = counts.get("普通永久", 0)
-        
-        result = f"🪽 光遇全图光翼统计\n\n"
-        result += f"📊 总光翼数量: {len(data)}\n"
-        result += f"   永久翼: {reissue + normal}个\n"
-        result += f"   (复刻先祖: {reissue}个, 常驻先祖: {normal}个)\n\n"
-        
-        result += "📍 各图光翼数量:\n"
-        for map_name, key in category_map.items():
-            if key not in ["复刻永久", "普通永久"]:
-                result += f"   {map_name}: {counts[key]}个\n"
-        
-        result += "\n💡 数据来源: 网易大神"
+        data = await self._get_wing_count_data()
+        result = self._format_wing_count_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_server_status")
@@ -450,35 +553,9 @@ class SkyPlugin(Star):
         
         当用户询问"光遇服务器状态"、"光遇排队"、"服务器"时使用此工具。
         '''
-        data = await self._fetch_json(self.SERVER_STATUS_API)
-        
-        if data is None:
-            yield event.plain_result("❌ 获取服务器状态失败，可能正在维护更新")
-            return
-        
-        ret = data.get("ret", 0)
-        pos = data.get("pos", 0)
-        wait_time = data.get("wait_time", 0)
-        
-        if ret != 1:
-            yield event.plain_result("✅ 当前光遇服务器畅通，无需排队")
-        else:
-            # 格式化等待时间
-            hours = wait_time // 3600
-            minutes = (wait_time % 3600) // 60
-            seconds = wait_time % 60
-            
-            if hours > 0:
-                time_display = f"{hours}时{minutes}分{seconds}秒"
-            elif minutes > 0:
-                time_display = f"{minutes}分{seconds}秒"
-            else:
-                time_display = f"{seconds}秒"
-            
-            result = f"⏳ 当前光遇服务器排队中\n\n"
-            result += f"👥 排队人数: {pos}位\n"
-            result += f"⏰ 预计等待时间: {time_display}"
-            yield event.plain_result(result)
+        data = await self._get_server_status_data()
+        result = self._format_server_status_result(data)
+        yield event.plain_result(result)
     
     # ==================== 光遇ID绑定功能 ====================
     
@@ -572,26 +649,22 @@ class SkyPlugin(Star):
                     yield event.plain_result("⚠️ 请先使用「光遇切换 <序号>」设置当前ID！")
                 return
         
-        # 查询光翼数据
-        url = f"{self.WING_QUERY_API}?key=IIoAMkBC5c5zl&id={sky_id}&type=json"
-        data = await self._fetch_json(url)
+        url = f"{self.WING_QUERY_API}?key={self.wing_query_key}&id={sky_id}&type=json"
+        data = await self._fetch_json(url, use_cache=False)
         
         if not data or not data.get("success"):
             error_msg = data.get("message", "未知错误") if data else "网络请求失败"
             yield event.plain_result(f"❌ 查询失败：{error_msg}")
             return
         
-        # 解析数据
         statistics = data.get("statistics", {})
         role_id = data.get("roleId", "未知")
         timestamp = data.get("timestamp", "")
         
-        # 构建结果
         result = f"🪽 光翼查询结果\n"
         result += f"📍 ID: {role_id}\n"
         result += f"🕐 数据时间: {timestamp}\n\n"
         
-        # 统计信息
         total = statistics.get("total", 0)
         collected = statistics.get("collected", 0)
         uncollected = statistics.get("uncollected", 0)
@@ -601,7 +674,6 @@ class SkyPlugin(Star):
         result += f"   已收集: {collected}\n"
         result += f"   未收集: {uncollected}\n\n"
         
-        # 地图统计
         map_stats = statistics.get("map_statistics", {})
         if map_stats:
             result += "📍 各地图光翼:\n"
@@ -613,55 +685,17 @@ class SkyPlugin(Star):
     @filter.command("光翼统计")
     async def count_wings(self, event: AstrMessageEvent):
         """获取全图光翼统计"""
-        data = await self._fetch_json(self.WING_API)
-        
-        if not data:
-            yield event.plain_result("❌ 获取光翼数据失败，请稍后重试")
-            return
-        
-        # 分类统计
-        category_map = {
-            "晨岛": "晨",
-            "云野": "云",
-            "雨林": "雨",
-            "霞谷": "霞",
-            "暮土": "暮",
-            "禁阁": "禁",
-            "暴风眼": "暴",
-            "复刻永久": "复刻永久",
-            "普通永久": "普通永久"
-        }
-        
-        counts = {v: 0 for v in category_map.values()}
-        
-        for item in data:
-            key = category_map.get(item.get("一级标签", ""))
-            if key:
-                counts[key] += 1
-        
-        reissue = counts.get("复刻永久", 0)
-        normal = counts.get("普通永久", 0)
-        
-        result = f"🪽 光遇全图光翼统计\n\n"
-        result += f"📊 总光翼数量: {len(data)}\n"
-        result += f"   永久翼: {reissue + normal}个\n"
-        result += f"   (复刻先祖: {reissue}个, 常驻先祖: {normal}个)\n\n"
-        
-        result += "📍 各图光翼数量:\n"
-        for map_name, key in category_map.items():
-            if key not in ["复刻永久", "普通永久"]:
-                result += f"   {map_name}: {counts[key]}个\n"
-        
-        result += "\n💡 数据来源: 网易大神"
+        data = await self._get_wing_count_data()
+        result = self._format_wing_count_result(data)
         yield event.plain_result(result)
     
-    # ==================== 信息查询命令 ====================
+    # ==================== 信息查询命令（复用核心逻辑）====================
     
     @filter.command("每日任务")
     async def daily_tasks(self, event: AstrMessageEvent):
         """获取每日任务图片"""
         rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.SKY_API_KEY}&num={rand}"
+        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🌟 光遇今日每日任务")
         yield event.image_result(image_url)
     
@@ -669,7 +703,7 @@ class SkyPlugin(Star):
     async def season_candles(self, event: AstrMessageEvent):
         """获取季节蜡烛位置图片"""
         rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scjl?key={self.SKY_API_KEY}&num={rand}"
+        image_url = f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
         yield event.image_result(image_url)
     
@@ -677,7 +711,7 @@ class SkyPlugin(Star):
     async def big_candles(self, event: AstrMessageEvent):
         """获取大蜡烛位置图片"""
         rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scdl?key={self.SKY_API_KEY}&num={rand}"
+        image_url = f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
         yield event.image_result(image_url)
     
@@ -685,154 +719,29 @@ class SkyPlugin(Star):
     async def free_magic(self, event: AstrMessageEvent):
         """获取免费魔法图片"""
         rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/mf/magic?key={self.SKY_API_KEY}&num={rand}"
+        image_url = f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("✨ 光遇今日免费魔法")
         yield event.image_result(image_url)
     
     @filter.command("季节进度")
     async def season_progress(self, event: AstrMessageEvent):
         """获取季节进度信息"""
-        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/GameProgress.json"
-        data = await self._fetch_json(url)
-        
-        if not data:
-            yield event.plain_result("❌ 获取季节信息失败，请稍后重试")
-            return
-        
-        season = data.get("season", {})
-        season_name = season.get("name", "未知季节")
-        start_date = season.get("startDate", "")
-        end_date = season.get("endDate", "")
-        required_true = season.get("requiredCandlesTrue", 0)
-        required_false = season.get("requiredCandlesFalse", 0)
-        
-        # 计算剩余时间
-        now = datetime.now()
-        days = 0
-        if end_date:
-            # 处理可能包含时间部分的日期格式
-            date_part = end_date.split()[0]  # 只取日期部分
-            end = datetime.strptime(date_part.replace("-", "/"), "%Y/%m/%d")
-            diff = end - now
-            days = diff.days
-            hours = diff.seconds // 3600
-            minutes = (diff.seconds % 3600) // 60
-            remaining = f"{days}天{hours}时{minutes}分" if days > 0 else f"{hours}时{minutes}分"
-        else:
-            remaining = "未知"
-        
-        result = f"🌸 当前季节: {season_name}\n"
-        if start_date:
-            result += f"📅 开始时间: {start_date}\n"
-        if end_date:
-            result += f"📅 结束时间: {end_date}\n"
-        result += f"⏰ 剩余时间: {remaining}\n"
-        
-        # 毕业所需天数
-        if days > 0:
-            days_with = (required_true + 5) // 6
-            days_without = (required_false + 4) // 5
-            result += f"\n📊 毕业所需天数:\n"
-            result += f"   有季卡: 约{days_with}天 ({required_true}根季节蜡烛)\n"
-            result += f"   无季卡: 约{days_without}天 ({required_false}根季节蜡烛)"
-        
+        data = await self._get_season_progress_data()
+        result = self._format_season_result(data)
         yield event.plain_result(result)
     
     @filter.command("碎石信息")
     async def debris_info(self, event: AstrMessageEvent):
         """获取今日碎石信息"""
-        now = datetime.now()
-        day = now.day
-        day_of_week = now.weekday()
-        
-        # 碎石规律
-        is_first_half = day <= 15
-        valid_days = [2, 6, 0] if is_first_half else [3, 5, 0]
-        
-        if day_of_week not in valid_days:
-            yield event.plain_result("💎 今日碎石信息\n\n今日无碎石")
-            return
-        
-        maps = ["暮土", "禁阁", "云野", "雨林", "霞谷"]
-        map_index = (day - 1) % len(maps)
-        map_name = maps[map_index]
-        
-        if day_of_week == 0:
-            debris_type = "红石" if is_first_half else "黑石"
-        elif day_of_week in [2, 3]:
-            debris_type = "黑石"
-        else:
-            debris_type = "红石"
-        
-        locations = {
-            "云野": {2: "蝴蝶平原", 3: "仙乡", 5: "云顶浮石", 6: "幽光山洞", 0: "圣岛"},
-            "雨林": {2: "荧光森林", 3: "密林遗迹", 5: "大树屋", 6: "雨林神殿", 0: "秘密花园"},
-            "霞谷": {2: "滑冰场", 3: "滑冰场", 5: "圆梦村", 6: "圆梦村", 0: "雪隐峰"},
-            "暮土": {2: "边陲荒漠", 3: "远古战场", 5: "黑水港湾", 6: "巨兽荒原", 0: "失落方舟"},
-            "禁阁": {2: "星光沙漠", 3: "星光沙漠", 5: "星光沙漠·一隅", 6: "星光沙漠·一隅", 0: "星光沙漠·一隅"}
-        }
-        
-        location = locations.get(map_name, {}).get(day_of_week, "未知位置")
-        
-        result = f"💎 今日碎石信息\n\n"
-        result += f"📍 地图: {map_name}\n"
-        result += f"📍 位置: {location}\n"
-        result += f"🔷 类型: {debris_type}\n\n"
-        result += f"⏰ 坠落时间:\n"
-        result += f"   • 07:08 (持续约50分钟)\n"
-        result += f"   • 13:08 (持续约50分钟)\n"
-        result += f"   • 19:08 (持续约50分钟)\n\n"
-        result += f"🎁 奖励: 升华蜡烛\n"
-        result += f"💡 完成碎石任务可以获得升华蜡烛奖励"
-        
+        data = await self._get_debris_info_data()
+        result = self._format_debris_result(data)
         yield event.plain_result(result)
     
     @filter.command("复刻先祖")
     async def traveling_spirit(self, event: AstrMessageEvent):
         """获取复刻先祖信息"""
-        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/RegressionRecords.json"
-        records = await self._fetch_json(url)
-        
-        if not records:
-            yield event.plain_result("❌ 获取复刻信息失败，请稍后重试")
-            return
-        
-        now = datetime.now()
-        current_year = now.year
-        
-        # 找到当年数据
-        year_data = None
-        for record in records:
-            if record.get("year") == current_year:
-                year_data = record
-                break
-        
-        if not year_data:
-            yield event.plain_result("暂无今年复刻数据")
-            return
-        
-        year_record = year_data.get("yearRecord", [])
-        if not year_record:
-            yield event.plain_result("暂无复刻数据")
-            return
-        
-        # 找最新月份
-        latest_month = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)[0]
-        month_record = latest_month.get("monthRecord", [])
-        
-        if not month_record:
-            yield event.plain_result("暂无复刻数据")
-            return
-        
-        latest = month_record[-1]
-        spirit_name = latest.get("name", "未知先祖")
-        spirit_day = latest.get("day", 0)
-        
-        result = f"🎭 当前复刻先祖: {spirit_name}\n\n"
-        result += f"📅 到达时间: {current_year}年{latest_month.get('month', 0)}月{spirit_day}日\n"
-        result += f"⏰ 停留时间: 约4天\n\n"
-        result += f"💡 发送「复刻兑换图」查看兑换物品详情"
-        
+        data = await self._get_traveling_spirit_data()
+        result = self._format_traveling_spirit_result(data)
         yield event.plain_result(result)
     
     @filter.command("献祭信息")
@@ -874,41 +783,15 @@ class SkyPlugin(Star):
     @filter.command("光遇状态")
     async def server_status(self, event: AstrMessageEvent):
         """获取光遇服务器状态"""
-        data = await self._fetch_json(self.SERVER_STATUS_API)
-        
-        if data is None:
-            yield event.plain_result("❌ 获取服务器状态失败，可能正在维护更新")
-            return
-        
-        ret = data.get("ret", 0)
-        pos = data.get("pos", 0)
-        wait_time = data.get("wait_time", 0)
-        
-        if ret != 1:
-            yield event.plain_result("✅ 当前光遇服务器畅通，无需排队")
-        else:
-            # 格式化等待时间
-            hours = wait_time // 3600
-            minutes = (wait_time % 3600) // 60
-            seconds = wait_time % 60
-            
-            if hours > 0:
-                time_display = f"{hours}时{minutes}分{seconds}秒"
-            elif minutes > 0:
-                time_display = f"{minutes}分{seconds}秒"
-            else:
-                time_display = f"{seconds}秒"
-            
-            result = f"⏳ 当前光遇服务器排队中\n\n"
-            result += f"👥 排队人数: {pos}位\n"
-            result += f"⏰ 预计等待时间: {time_display}"
-            yield event.plain_result(result)
+        data = await self._get_server_status_data()
+        result = self._format_server_status_result(data)
+        yield event.plain_result(result)
     
     # ==================== 定时任务 ====================
     
     async def _scheduler_loop(self):
         """定时任务调度器"""
-        while True:
+        while self._running:
             try:
                 now = datetime.now()
                 current_time = now.strftime("%H:%M")
@@ -931,6 +814,8 @@ class SkyPlugin(Star):
                     await self._push_debris_info()
                 
                 await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"定时任务出错: {e}")
                 await asyncio.sleep(60)
@@ -941,7 +826,7 @@ class SkyPlugin(Star):
             return
         
         rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.SKY_API_KEY}&num={rand}"
+        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
         
         for group_id in self.push_groups:
             try:
@@ -990,21 +875,12 @@ class SkyPlugin(Star):
         if not self.push_groups:
             return
         
-        now = datetime.now()
-        day = now.day
-        day_of_week = now.weekday()
-        
-        is_first_half = day <= 15
-        valid_days = [2, 6, 0] if is_first_half else [3, 5, 0]
-        
-        if day_of_week not in valid_days:
+        data = await self._get_debris_info_data()
+        if not data.get("has_debris"):
             return
         
-        maps = ["暮土", "禁阁", "云野", "雨林", "霞谷"]
-        map_name = maps[(day - 1) % len(maps)]
-        
         message = f"💎 今日碎石信息\n\n"
-        message += f"📍 地图: {map_name}\n"
+        message += f"📍 地图: {data['map_name']}\n"
         message += "💡 完成碎石任务可以获得升华蜡烛奖励~"
         
         for group_id in self.push_groups:
@@ -1030,7 +906,7 @@ class SkyPlugin(Star):
 • 复刻先祖 - 查看当前复刻先祖
 • 献祭信息 - 查看献祭相关信息
 • 老奶奶时间 - 查看老奶奶用餐时间
-• 光遇状态 - 查看光遇服务器状态
+• 光遇状态 - 查看光遇服务器排队状态
 
 🪽 光翼查询:
 • 光遇绑定 <ID> - 绑定光遇ID
