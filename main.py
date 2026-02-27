@@ -6,13 +6,13 @@ API来源: https://gitee.com/Tloml-Starry/Tlon-Sky
 import asyncio
 import json
 import random
-import time
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
-from zoneinfo import ZoneInfo  # [修复] Python 3.9+ 推荐时区处理方式
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from astrbot.api.star import Context, Star, StarTools
@@ -68,23 +68,21 @@ class SkyPlugin(Star):
     WING_QUERY_API = "https://ovoav.com/api/sky/gycx/gka"
     SERVER_STATUS_API = "https://live-queue-sky-merge.game.163.com/queue?type=json"
     
-    # [修复] 使用 zoneinfo 处理时区（Python 3.9+ 最佳实践）
     BEIJING_TZ = ZoneInfo("Asia/Shanghai")
     
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         
-        # 从配置读取 API Key
+        # 从配置读取，并检查是否为空
         self.sky_api_key = config.get("sky_api_key", "")
         self.wing_query_key = config.get("wing_query_key", "")
+        self.push_platform = config.get("push_platform", "aiocqhttp")
+        self.push_groups = config.get("push_groups", [])
         
         # 推送配置
         self.enable_daily_task_push = config.get("enable_daily_task_push", True)
         self.daily_task_push_time = config.get("daily_task_push_time", "08:00")
-        self.push_groups = config.get("push_groups", [])
-        # [修复] 新增平台配置，支持多平台适配，默认 aiocqhttp (QQ)
-        self.push_platform = config.get("push_platform", "aiocqhttp")
         self.enable_grandma_reminder = config.get("enable_grandma_reminder", True)
         self.enable_sacrifice_reminder = config.get("enable_sacrifice_reminder", True)
         self.enable_debris_reminder = config.get("enable_debris_reminder", True)
@@ -93,19 +91,23 @@ class SkyPlugin(Star):
         self.api_timeout = config.get("api_timeout", 10)
         self.cache_duration = config.get("cache_duration", 30)
         
+        # 时间格式校验
+        self._validate_configs()
+        
         # 数据缓存
         self._cache: Dict[str, Dict] = {}
         self._cache_time: Dict[str, float] = {}
-        # [修复] 引入缓存锁，防止缓存击穿
         self._cache_locks: Dict[str, asyncio.Lock] = {}
         
-        # 使用 StarTools 获取数据目录
+        # 数据目录
         plugin_data_dir = StarTools.get_data_dir()
         self.sky_bindings_dir = plugin_data_dir / "sky_bindings"
         self.sky_bindings_dir.mkdir(parents=True, exist_ok=True)
         
-        # 文件写入锁，防止并发写入导致数据损坏
+        # 文件写入锁
         self._file_lock = asyncio.Lock()
+        # 每个用户的操作锁，防止并发下丢更新
+        self._user_locks: Dict[str, asyncio.Lock] = {}
         
         # 共享的 ClientSession
         self._session: Optional[aiohttp.ClientSession] = None
@@ -113,25 +115,41 @@ class SkyPlugin(Star):
         # 定时任务
         self._scheduler_task: Optional[asyncio.Task] = None
         self._running = False
-        
-        # [修复] 使用集合跟踪活跃的推送子任务，便于统一取消
         self._active_push_tasks: Set[asyncio.Task] = set()
-        
-        # [修复] 记录每个任务的执行状态，使用更高效的存储结构
-        # 格式: {task_type: last_executed_date_str}
         self._last_executed: Dict[str, str] = {}
         
         logger.info("光遇插件已加载")
     
+    def _validate_configs(self):
+        """配置校验"""
+        if not self.sky_api_key:
+            logger.warning("⚠️ sky_api_key 未配置，图片查询功能将不可用")
+        if not self.wing_query_key:
+            logger.warning("⚠️ wing_query_key 未配置，光翼查询功能将不可用")
+        
+        # 校验时间格式
+        if self.enable_daily_task_push:
+            try:
+                hour, minute = map(int, self.daily_task_push_time.split(':'))
+                if not (0 <= hour < 24 and 0 <= minute < 60):
+                    raise ValueError
+            except (ValueError, AttributeError):
+                logger.error(f"❌ daily_task_push_time 格式错误: {self.daily_task_push_time}，应为 HH:MM 格式，已禁用每日推送")
+                self.enable_daily_task_push = False
+    
+    def _get_user_lock(self, user_id: str) -> asyncio.Lock:
+        """获取用户级锁，防止并发修改同一用户数据"""
+        if user_id not in self._user_locks:
+            self._user_locks[user_id] = asyncio.Lock()
+        return self._user_locks[user_id]
+    
     async def initialize(self):
         """插件加载时自动调用"""
-        # 创建共享的 ClientSession
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.api_timeout)
         )
         self._running = True
         
-        # 启动定时任务调度器（只要有任意一个提醒功能开启就启动）
         if (self.enable_daily_task_push or self.enable_grandma_reminder or 
             self.enable_sacrifice_reminder or self.enable_debris_reminder):
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -141,7 +159,6 @@ class SkyPlugin(Star):
         """插件关闭时自动调用"""
         self._running = False
         
-        # 取消调度器主任务
         if self._scheduler_task:
             self._scheduler_task.cancel()
             try:
@@ -149,42 +166,35 @@ class SkyPlugin(Star):
             except asyncio.CancelledError:
                 pass
         
-        # [修复] 取消所有活跃的推送子任务
         if self._active_push_tasks:
             logger.info(f"正在取消 {len(self._active_push_tasks)} 个未完成的推送任务...")
             for task in list(self._active_push_tasks):
                 if not task.done():
                     task.cancel()
             
-            # 等待所有任务完成或取消
             if self._active_push_tasks:
                 await asyncio.gather(*self._active_push_tasks, return_exceptions=True)
             self._active_push_tasks.clear()
         
-        # 关闭 ClientSession
         if self._session:
             await self._session.close()
             self._session = None
         
         logger.info("光遇插件已终止")
     
-    # [修复] 辅助方法：创建受跟踪的推送任务
     def _create_tracked_task(self, coro) -> asyncio.Task:
-        """创建被跟踪的异步任务，确保可以统一取消"""
+        """创建被跟踪的异步任务"""
         task = asyncio.create_task(coro)
         self._active_push_tasks.add(task)
         
-        # 任务完成时自动从集合中移除
         def cleanup(t):
             self._active_push_tasks.discard(t)
         
         task.add_done_callback(cleanup)
         return task
     
-    # [修复] 辅助方法：清理过期的 _last_executed 记录
     def _cleanup_last_executed(self, current_date: str):
-        """清理非当天的执行记录，防止内存无限增长"""
-        # 只保留当天的记录
+        """清理非当天的执行记录"""
         keys_to_remove = [
             key for key in self._last_executed.keys() 
             if not key.endswith(f"_{current_date}")
@@ -192,17 +202,12 @@ class SkyPlugin(Star):
         for key in keys_to_remove:
             del self._last_executed[key]
     
-    # [修复] 辅助方法：构造 unified_msg_origin
     def _build_unified_msg_origin(self, group_id: str) -> str:
-        """构造统一消息来源标识符，支持多平台适配"""
+        """构造统一消息来源标识符"""
         if ":" in str(group_id):
-            # 如果已经是 unified_msg_origin 格式，直接使用
             return str(group_id)
         
-        # 根据配置的平台构造
-        platform = self.push_platform
-        # 默认使用 GroupMessage 类型，如需支持私聊可扩展配置
-        return f"{platform}:GroupMessage:{group_id}"
+        return f"{self.push_platform}:GroupMessage:{group_id}"
     
     # ==================== 数据文件操作 ====================
     
@@ -211,16 +216,10 @@ class SkyPlugin(Star):
         return self.sky_bindings_dir / f"{user_id}.json"
     
     async def _load_json(self, file_path: Path, default: Optional[dict] = None) -> dict:
-        """加载JSON文件（异步安全）
-        
-        [修复] 区分"文件不存在"和"读取错误"：
-        - 文件不存在：返回默认值（初始化新用户）
-        - 读取错误：抛出异常，避免误覆盖数据
-        """
+        """加载JSON文件（异步安全）"""
         if default is None:
             default = {}
         
-        # 文件不存在，返回默认值（新用户初始化）
         if not file_path.exists():
             return default.copy()
         
@@ -243,11 +242,9 @@ class SkyPlugin(Star):
         """保存JSON文件（异步安全，带锁保护）"""
         try:
             async with self._file_lock:
-                # 使用临时文件写入，防止写入过程中断导致数据损坏
                 temp_path = file_path.with_suffix('.tmp')
                 with open(temp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                # 原子性替换
                 temp_path.replace(file_path)
         except Exception as e:
             logger.error(f"保存JSON文件失败 {file_path}: {e}")
@@ -267,7 +264,6 @@ class SkyPlugin(Star):
                 await self._save_json(file_path, data)
             return data
         except RuntimeError:
-            # 数据文件损坏，返回空数据但不自动覆盖，让用户知道
             logger.error(f"用户 {user_id} 的数据文件损坏，请手动检查")
             return {
                 "user_id": user_id,
@@ -283,9 +279,8 @@ class SkyPlugin(Star):
     
     # ==================== 缓存操作 ====================
     
-    # [修复] 获取或创建缓存锁，防止缓存击穿
     def _get_cache_lock(self, key: str) -> asyncio.Lock:
-        """获取指定缓存键的锁，用于防止缓存击穿"""
+        """获取指定缓存键的锁"""
         if key not in self._cache_locks:
             self._cache_locks[key] = asyncio.Lock()
         return self._cache_locks[key]
@@ -311,23 +306,18 @@ class SkyPlugin(Star):
         return masked
     
     async def _fetch_json(self, url: str, use_cache: bool = True, cache_key: Optional[str] = None) -> Optional[Dict]:
-        """从URL获取JSON数据
-        [修复] 扩大异常捕获范围，处理编码错误和连接中断
-        """
-        # 检查缓存
+        """从URL获取JSON数据"""
         if use_cache and cache_key:
             cached = self._get_cache(cache_key)
             if cached is not None:
                 return cached
         
-        # [修复] 使用锁防止缓存击穿
         lock = self._get_cache_lock(cache_key) if use_cache and cache_key else None
         
         if lock:
             await lock.acquire()
         
         try:
-            # 双重检查（获取锁后再次检查缓存）
             if use_cache and cache_key:
                 cached = self._get_cache(cache_key)
                 if cached is not None:
@@ -344,7 +334,6 @@ class SkyPlugin(Star):
                             logger.error(f"响应为空 ({self._mask_url(url)})")
                             return None
                         data = json.loads(text)
-                        # 设置缓存
                         if use_cache and cache_key:
                             self._set_cache(cache_key, data)
                         return data
@@ -366,6 +355,22 @@ class SkyPlugin(Star):
         finally:
             if lock:
                 lock.release()
+    
+    # 新增：下载图片到内存
+    async def _download_image(self, url: str) -> Optional[bytes]:
+        """下载图片到内存"""
+        try:
+            if self._session is None:
+                return None
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                else:
+                    logger.error(f"下载图片失败: HTTP {resp.status}")
+                    return None
+        except Exception as e:
+            logger.error(f"下载图片失败: {e}")
+            return None
     
     # ==================== 时间工具 ====================
     
@@ -437,9 +442,7 @@ class SkyPlugin(Star):
         return await self._fetch_json(url, use_cache=True, cache_key="season_progress")
     
     def _format_season_result(self, data: Optional[Dict]) -> str:
-        """格式化季节进度结果
-        [修复] 加强时间解析的异常处理
-        """
+        """格式化季节进度结果"""
         if not data:
             return "❌ 获取季节信息失败，请稍后重试"
         
@@ -454,25 +457,19 @@ class SkyPlugin(Star):
         remaining = "未知"
         days = 0
         
-        # [修复] 严密的时间解析异常处理
         if end_date and isinstance(end_date, str):
             try:
-                # 处理多种可能的日期格式
                 date_str = end_date.strip()
                 if not date_str:
                     remaining = "未知"
                 else:
-                    # 尝试提取日期部分（处理 "2024/01/01 00:00:00" 或 "2024-01-01" 等格式）
                     date_part = date_str.split()[0]
-                    # 统一替换分隔符为 /
                     date_part = date_part.replace("-", "/")
                     
                     end = datetime.strptime(date_part, "%Y/%m/%d")
-                    # 设置时区为北京时间
                     end = end.replace(tzinfo=self.BEIJING_TZ)
                     diff = end - now
                     
-                    # 检查是否已结束
                     if diff.total_seconds() <= 0:
                         remaining = "已结束"
                         days = 0
@@ -503,9 +500,7 @@ class SkyPlugin(Star):
         return result
     
     async def _get_traveling_spirit_data(self) -> Optional[Dict]:
-        """获取复刻先祖数据
-        [修复] 对 monthRecord 按日期排序，不依赖源数据顺序
-        """
+        """获取复刻先祖数据 - 修复月份回退逻辑"""
         url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/RegressionRecords.json"
         records = await self._fetch_json(url, use_cache=True, cache_key="traveling_spirit")
         
@@ -528,27 +523,26 @@ class SkyPlugin(Star):
         if not year_record:
             return None
         
-        # 按月份排序，获取最新月份
+        # 按月份倒序排列，从高月份到低月份查找第一个有数据的月份
         sorted_months = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)
-        if not sorted_months:
-            return None
         
-        latest_month = sorted_months[0]
-        month_record = latest_month.get("monthRecord", [])
+        for month_data in sorted_months:
+            month_record = month_data.get("monthRecord", [])
+            if month_record:  # 找到第一个有数据的月份
+                # 按日期排序取最新记录
+                sorted_records = sorted(month_record, key=lambda x: x.get("day", 0))
+                latest = sorted_records[-1]
+                
+                # 修正：确保字典正确闭合
+                return {
+                    "spirit_name": latest.get("name", "未知先祖"),
+                    "spirit_day": latest.get("day", 0),
+                    "month": month_data.get("month", 0),
+                    "year": current_year
+                }
         
-        if not month_record:
-            return None
-        
-        # [修复] 按日期排序，确保取到最新的先祖，不依赖源数据顺序
-        sorted_records = sorted(month_record, key=lambda x: x.get("day", 0))
-        latest = sorted_records[-1]
-        
-        return {
-            "spirit_name": latest.get("name", "未知先祖"),
-            "spirit_day": latest.get("day", 0),
-            "month": latest_month.get("month", 0),
-            "year": current_year
-        }
+        # 如果今年所有月份都没数据，返回 None
+        return None
     
     def _format_traveling_spirit_result(self, data: Optional[Dict]) -> str:
         """格式化复刻先祖结果"""
@@ -637,128 +631,160 @@ class SkyPlugin(Star):
         result += "\n💡 数据来源: 网易大神"
         return result
     
-    # ==================== 图片URL生成（统一处理）====================
+    # ==================== 图片URL生成（内部使用，对外不暴露key）====================
     
     def _get_daily_task_image_url(self) -> str:
-        """获取每日任务图片URL"""
+        """获取每日任务图片URL（内部使用）"""
         rand = random.randint(0, 1000000)
         return f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
     
     def _get_season_candle_image_url(self) -> str:
-        """获取季节蜡烛图片URL"""
+        """获取季节蜡烛图片URL（内部使用）"""
         rand = random.randint(0, 1000000)
         return f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
     
     def _get_big_candle_image_url(self) -> str:
-        """获取大蜡烛图片URL"""
+        """获取大蜡烛图片URL（内部使用）"""
         rand = random.randint(0, 1000000)
         return f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
     
     def _get_magic_image_url(self) -> str:
-        """获取免费魔法图片URL"""
+        """获取免费魔法图片URL（内部使用）"""
         rand = random.randint(0, 1000000)
         return f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
+    
+    # 新增：统一的图片查询 handler
+    async def _handle_image_query(self, query_type: str) -> Tuple[str, Optional[bytes]]:
+        """
+        统一处理图片查询，返回 (标题, 图片数据)
+        下载图片到内存，避免 URL 泄露 API key
+        """
+        # 检查 API key
+        if not self.sky_api_key:
+            return "❌ 管理员未配置 sky_api_key，请联系管理员配置", None
+        
+        url_map = {
+            "daily_task": (self._get_daily_task_image_url(), "🌟 光遇今日每日任务"),
+            "season_candle": (self._get_season_candle_image_url(), "🕯️ 光遇今日季节蜡烛位置"),
+            "big_candle": (self._get_big_candle_image_url(), "🕯️ 光遇今日大蜡烛位置"),
+            "magic": (self._get_magic_image_url(), "✨ 光遇今日免费魔法")
+        }
+        
+        if query_type not in url_map:
+            return "❌ 未知的查询类型", None
+        
+        url, title = url_map[query_type]
+        image_data = await self._download_image(url)
+        
+        if image_data is None:
+            return f"{title}\n❌ 图片下载失败，请稍后重试", None
+        
+        return title, image_data
     
     # ==================== LLM工具函数 ====================
     
     @filter.llm_tool(name="get_sky_daily_tasks")
     async def tool_get_daily_tasks(self, event: AstrMessageEvent):
-        """获取光遇今日每日任务图片
+        """获取光遇今日每日任务图片"""
+        title, image_data = await self._handle_image_query("daily_task")
         
-        当用户询问"今天有什么任务"、"每日任务是什么"、"光遇任务"时使用此工具。
-        """
-        yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(self._get_daily_task_image_url())
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        # 使用 chain_result 发送图片
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.llm_tool(name="get_sky_season_candles")
     async def tool_get_season_candles(self, event: AstrMessageEvent):
-        """获取光遇季节蜡烛位置图片
+        """获取光遇季节蜡烛位置图片"""
+        title, image_data = await self._handle_image_query("season_candle")
         
-        当用户询问"季节蜡烛在哪里"、"季蜡位置"、"季节蜡烛"时使用此工具。
-        """
-        yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(self._get_season_candle_image_url())
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.llm_tool(name="get_sky_big_candles")
     async def tool_get_big_candles(self, event: AstrMessageEvent):
-        """获取光遇大蜡烛位置图片
+        """获取光遇大蜡烛位置图片"""
+        title, image_data = await self._handle_image_query("big_candle")
         
-        当用户询问"大蜡烛在哪里"、"大蜡位置"、"大蜡烛"时使用此工具。
-        """
-        yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(self._get_big_candle_image_url())
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.llm_tool(name="get_sky_free_magic")
     async def tool_get_free_magic(self, event: AstrMessageEvent):
-        """获取光遇免费魔法图片
+        """获取光遇免费魔法图片"""
+        title, image_data = await self._handle_image_query("magic")
         
-        当用户询问"今天有什么魔法"、"免费魔法"、"魔法"时使用此工具。
-        """
-        yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(self._get_magic_image_url())
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.llm_tool(name="get_sky_season_progress")
     async def tool_get_season_progress(self, event: AstrMessageEvent):
-        """获取当前季节进度信息
-        
-        当用户询问"现在是什么季节"、"季节还有多久结束"、"季节进度"时使用此工具。
-        """
+        """获取当前季节进度信息"""
         data = await self._get_season_progress_data()
         result = self._format_season_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_debris_info")
     async def tool_get_debris_info(self, event: AstrMessageEvent):
-        """获取今日碎石信息
-        
-        当用户询问"今天碎石在哪里"、"碎石是什么类型"、"碎石"时使用此工具。
-        """
+        """获取今日碎石信息"""
         data = await self._get_debris_info_data()
         result = self._format_debris_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_traveling_spirit")
     async def tool_get_traveling_spirit(self, event: AstrMessageEvent):
-        """获取复刻先祖信息
-        
-        当用户询问"复刻先祖是谁"、"复刻有什么物品"、"复刻"时使用此工具。
-        """
+        """获取复刻先祖信息"""
         data = await self._get_traveling_spirit_data()
         result = self._format_traveling_spirit_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_sacrifice_info")
     async def tool_get_sacrifice_info(self, event: AstrMessageEvent):
-        """获取献祭相关信息
-        
-        当用户询问"献祭什么时候刷新"、"献祭有什么奖励"、"献祭"时使用此工具。
-        """
+        """获取献祭相关信息"""
         yield event.plain_result(SACRIFICE_INFO_TEXT)
     
     @filter.llm_tool(name="get_sky_grandma_schedule")
     async def tool_get_grandma_schedule(self, event: AstrMessageEvent):
-        """获取老奶奶用餐时间表
-        
-        当用户询问"老奶奶什么时候开饭"、"老奶奶在哪里"、"老奶奶"时使用此工具。
-        """
+        """获取老奶奶用餐时间表"""
         yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
     
     @filter.llm_tool(name="get_sky_wing_count")
     async def tool_get_wing_count(self, event: AstrMessageEvent):
-        """获取光遇全图光翼统计
-        
-        当用户询问"光翼有多少个"、"全图光翼"、"光翼统计"时使用此工具。
-        """
+        """获取光遇全图光翼统计"""
         data = await self._get_wing_count_data()
         result = self._format_wing_count_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_server_status")
     async def tool_get_server_status(self, event: AstrMessageEvent):
-        """获取光遇服务器状态
-        
-        当用户询问"光遇服务器状态"、"光遇排队"、"服务器"时使用此工具。
-        """
+        """获取光遇服务器状态"""
         data = await self._get_server_status_data()
         result = self._format_server_status_result(data)
         yield event.plain_result(result)
@@ -769,69 +795,76 @@ class SkyPlugin(Star):
     async def bind_sky_id(self, event: AstrMessageEvent, sky_id: str):
         """绑定光遇ID"""
         user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
         
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if sky_id in user_data["ids"]:
-            yield event.plain_result(f"⚠️ ID {sky_id} 已经绑定过了！")
-            return
-        
-        user_data["ids"].append(sky_id)
-        if not user_data["current_id"]:
-            user_data["current_id"] = sky_id
-        
-        await self._save_user_sky_data(user_id, user_data)
-        yield event.plain_result(f"✅ 绑定成功！当前ID: {sky_id}\n\n💡 使用「光翼查询」查询该ID的光翼信息")
+        # 使用用户级锁，防止并发修改
+        async with self._get_user_lock(user_id):
+            user_data = await self._get_user_sky_data(user_id)
+            
+            if "_error" in user_data:
+                yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+                return
+            
+            if sky_id in user_data["ids"]:
+                yield event.plain_result(f"⚠️ ID {sky_id} 已经绑定过了！")
+                return
+            
+            user_data["ids"].append(sky_id)
+            if not user_data["current_id"]:
+                user_data["current_id"] = sky_id
+            
+            await self._save_user_sky_data(user_id, user_data)
+            yield event.plain_result(f"✅ 绑定成功！当前ID: {sky_id}\n\n💡 使用「光翼查询」查询该ID的光翼信息")
     
     @filter.command("光遇切换")
     async def switch_sky_id(self, event: AstrMessageEvent, index: int):
         """切换当前光遇ID"""
         user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
         
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if not user_data["ids"]:
-            yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定")
-            return
-        
-        if index < 1 or index > len(user_data["ids"]):
-            yield event.plain_result(f"序号无效！请输入1-{len(user_data['ids'])}之间的数字。")
-            return
-        
-        user_data["current_id"] = user_data["ids"][index - 1]
-        await self._save_user_sky_data(user_id, user_data)
-        yield event.plain_result(f"✅ 已切换到ID: {user_data['current_id']}")
+        async with self._get_user_lock(user_id):
+            user_data = await self._get_user_sky_data(user_id)
+            
+            if "_error" in user_data:
+                yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+                return
+            
+            if not user_data["ids"]:
+                yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定")
+                return
+            
+            if index < 1 or index > len(user_data["ids"]):
+                yield event.plain_result(f"序号无效！请输入1-{len(user_data['ids'])}之间的数字。")
+                return
+            
+            user_data["current_id"] = user_data["ids"][index - 1]
+            await self._save_user_sky_data(user_id, user_data)
+            yield event.plain_result(f"✅ 已切换到ID: {user_data['current_id']}")
     
     @filter.command("光遇删除")
     async def delete_sky_id(self, event: AstrMessageEvent, index: int):
         """删除绑定的光遇ID"""
         user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
         
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if not user_data["ids"]:
-            yield event.plain_result("⚠️ 您还没有绑定任何ID！")
-            return
-        
-        if index < 1 or index > len(user_data["ids"]):
-            yield event.plain_result(f"序号无效！请输入1-{len(user_data['ids'])}之间的数字。")
-            return
-        
-        deleted_id = user_data["ids"].pop(index - 1)
-        if user_data["current_id"] == deleted_id:
-            user_data["current_id"] = user_data["ids"][0] if user_data["ids"] else None
-        
-        await self._save_user_sky_data(user_id, user_data)
-        yield event.plain_result(f"✅ 已删除ID: {deleted_id}")
+        async with self._get_user_lock(user_id):
+            user_data = await self._get_user_sky_data(user_id)
+            
+            if "_error" in user_data:
+                yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+                return
+            
+            if not user_data["ids"]:
+                yield event.plain_result("⚠️ 您还没有绑定任何ID！")
+                return
+            
+            if index < 1 or index > len(user_data["ids"]):
+                yield event.plain_result(f"序号无效！请输入1-{len(user_data['ids'])}之间的数字。")
+                return
+            
+            deleted_id = user_data["ids"].pop(index - 1)
+            if user_data["current_id"] == deleted_id:
+                user_data["current_id"] = user_data["ids"][0] if user_data["ids"] else None
+            
+            await self._save_user_sky_data(user_id, user_data)
+            yield event.plain_result(f"✅ 已删除ID: {deleted_id}")
     
     @filter.command("光遇ID列表")
     async def list_sky_ids(self, event: AstrMessageEvent):
@@ -862,16 +895,13 @@ class SkyPlugin(Star):
             return ""
         
         lines = []
-        # 定义地图顺序，让显示更有序
         map_order = ["晨岛", "云野", "雨林", "霞谷", "暮土", "禁阁", "暴风眼", "破晓季"]
         
-        # 先按固定顺序排列存在的地图
         sorted_maps = []
         for map_name in map_order:
             if map_name in map_stats:
                 sorted_maps.append((map_name, map_stats[map_name]))
         
-        # 添加其他未在顺序列表中的地图
         for map_name, map_data in map_stats.items():
             if map_name not in map_order:
                 sorted_maps.append((map_name, map_data))
@@ -882,11 +912,9 @@ class SkyPlugin(Star):
                 collected = map_data.get("collected", 0)
                 uncollected = map_data.get("uncollected", 0)
                 
-                # 计算未收集（如果没有uncollected字段，用total-collected）
                 if uncollected == 0 and total > 0:
                     uncollected = total - collected
                 
-                # 使用emoji标记状态
                 if uncollected == 0:
                     status = "✅"
                     detail = "已拿满"
@@ -897,7 +925,6 @@ class SkyPlugin(Star):
                 line = f"   {status} {map_name}: {collected}/{total}个 ({detail})"
                 lines.append(line)
             else:
-                # 处理简单数值格式
                 lines.append(f"   • {map_name}: {map_data}个")
         
         return "\n".join(lines) + "\n" if lines else ""
@@ -905,6 +932,11 @@ class SkyPlugin(Star):
     @filter.command("光翼查询")
     async def query_wings(self, event: AstrMessageEvent, sky_id: Optional[str] = None):
         """查询光翼信息"""
+        # 检查 API key
+        if not self.wing_query_key:
+            yield event.plain_result("❌ 管理员未配置 wing_query_key，请联系管理员配置光翼查询API密钥")
+            return
+        
         user_id = event.get_sender_id()
         
         if sky_id is None:
@@ -978,31 +1010,68 @@ class SkyPlugin(Star):
         result = self._format_wing_count_result(data)
         yield event.plain_result(result)
     
-    # ==================== 信息查询命令（复用核心逻辑）====================
+    # ==================== 信息查询命令（复用统一的 handler）====================
     
     @filter.command("每日任务")
     async def daily_tasks(self, event: AstrMessageEvent):
         """获取每日任务图片"""
-        yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(self._get_daily_task_image_url())
+        title, image_data = await self._handle_image_query("daily_task")
+        
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        # 使用 chain_result 发送图片
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.command("季节蜡烛")
     async def season_candles(self, event: AstrMessageEvent):
         """获取季节蜡烛位置图片"""
-        yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(self._get_season_candle_image_url())
+        title, image_data = await self._handle_image_query("season_candle")
+        
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.command("大蜡烛")
     async def big_candles(self, event: AstrMessageEvent):
         """获取大蜡烛位置图片"""
-        yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(self._get_big_candle_image_url())
+        title, image_data = await self._handle_image_query("big_candle")
+        
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.command("免费魔法")
     async def free_magic(self, event: AstrMessageEvent):
         """获取免费魔法图片"""
-        yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(self._get_magic_image_url())
+        title, image_data = await self._handle_image_query("magic")
+        
+        if image_data is None:
+            yield event.plain_result(title)
+            return
+        
+        chain = [
+            Comp.Plain(title),
+            Comp.Image.fromBytes(image_data)
+        ]
+        yield event.chain_result(chain)
     
     @filter.command("季节进度")
     async def season_progress(self, event: AstrMessageEvent):
@@ -1045,7 +1114,7 @@ class SkyPlugin(Star):
     # ==================== 定时任务 ====================
     
     async def _scheduler_loop(self):
-        """定时任务调度器（动态计算睡眠时间，避免时间漂移）"""
+        """定时任务调度器"""
         last_date = None
         
         while self._running:
@@ -1055,18 +1124,17 @@ class SkyPlugin(Star):
                 current_minute = now.minute
                 current_hour = now.hour
                 
-                # [修复] 日期变化时清理过期记录，防止内存无限增长
+                # 日期变化时清理过期记录
                 if last_date != current_date:
                     if last_date is not None:
                         self._cleanup_last_executed(current_date)
                     last_date = current_date
                 
-                # [修复] 每日任务推送 - 使用"时间窗口"检查（>= 目标时间），避免精确匹配漏触发
+                # 每日任务推送
                 if self.enable_daily_task_push:
                     task_key = f"daily_task_{current_date}"
                     target_hour, target_min = map(int, self.daily_task_push_time.split(':'))
                     
-                    # 检查是否已经到了或过了推送时间，且今天未执行
                     is_time_reached = (current_hour > target_hour or 
                                       (current_hour == target_hour and current_minute >= target_min))
                     
@@ -1074,87 +1142,92 @@ class SkyPlugin(Star):
                         self._last_executed[task_key] = current_date
                         self._create_tracked_task(self._push_daily_tasks())
                 
-                # [修复] 老奶奶提醒 - 使用"时间窗口"检查（整点后1分钟内都算）
+                # 老奶奶提醒（整点后1分钟内都算）
                 if self.enable_grandma_reminder:
                     if current_hour in [8, 10, 12, 16, 18, 20]:
                         grandma_key = f"grandma_{current_date}_{current_hour}"
-                        # 整点后1分钟内都算，防止跳过整点
                         if current_minute <= 1 and self._last_executed.get(grandma_key) != current_date:
                             self._last_executed[grandma_key] = current_date
                             self._create_tracked_task(self._push_grandma_reminder())
                 
-                # [修复] 献祭刷新提醒（周六00:00）- 使用"时间窗口"检查（00:00-00:01）
+                # 献祭刷新提醒（周六00:00-00:01）
                 if self.enable_sacrifice_reminder:
-                    if now.weekday() == 5 and current_hour == 0:  # 周六
+                    if now.weekday() == 5 and current_hour == 0:
                         sacrifice_key = f"sacrifice_{current_date}"
-                        # 00:00到00:01之间都算
                         if current_minute <= 1 and self._last_executed.get(sacrifice_key) != current_date:
                             self._last_executed[sacrifice_key] = current_date
                             self._create_tracked_task(self._push_sacrifice_reminder())
                 
-                # [修复] 碎石提醒（每天08:00）- 使用"时间窗口"检查（08:00-08:01）
+                # 碎石提醒（每天08:00-08:01）
                 if self.enable_debris_reminder:
                     if current_hour == 8:
                         debris_key = f"debris_{current_date}"
-                        # 08:00到08:01之间都算
                         if current_minute <= 1 and self._last_executed.get(debris_key) != current_date:
                             self._last_executed[debris_key] = current_date
                             self._create_tracked_task(self._push_debris_info())
                 
-                # [修复] 使用微秒级精度计算睡眠时间，避免 59.9 秒导致的死循环空转
+                # 修正睡眠时间计算，避免 59.9 秒死循环
                 now = self._get_beijing_time()
                 sleep_seconds = 60.1 - (now.second + now.microsecond / 1_000_000.0)
-                if sleep_seconds < 0.1:  # 防止负数或过小值
+                if sleep_seconds < 0.1:
                     sleep_seconds = 60.1
                 await asyncio.sleep(sleep_seconds)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"定时任务出错: {e}")
-                # 异常时也使用修正后的睡眠时间计算
                 now = self._get_beijing_time()
                 sleep_seconds = 60.1 - (now.second + now.microsecond / 1_000_000.0)
                 if sleep_seconds < 0.1:
-                    sleep_seconds = 1  # 异常时至少休息1秒，避免快速重试
+                    sleep_seconds = 1
                 await asyncio.sleep(sleep_seconds)
     
     async def _push_daily_tasks(self):
-        """推送每日任务（并发发送，避免阻塞）"""
+        """推送每日任务 - 下载图片后发送，避免 URL 泄露 key"""
         if not self.push_groups:
             return
         
+        # 检查 API key
+        if not self.sky_api_key:
+            logger.error("sky_api_key 未配置，无法推送每日任务")
+            return
+        
+        # 下载图片到内存
         image_url = self._get_daily_task_image_url()
+        image_data = await self._download_image(image_url)
+        
+        if image_data is None:
+            logger.error("每日任务图片下载失败，取消推送")
+            return
         
         async def send_to_group(group_id: str):
             try:
-                # [修复] 构造 unified_msg_origin，支持多平台适配
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 
-                # 使用 MessageChain 构建消息
+                # 发送图片数据而不是 URL ，避免 key 泄露
                 chain = MessageChain()
                 chain.chain = [
                     Comp.Plain("🌟 光遇今日每日任务"),
-                    Comp.Image.fromURL(image_url)
+                    Comp.Image.fromBytes(image_data)  # 使用 fromBytes 发送内存中的图片
                 ]
                 await self.context.send_message(unified_msg_origin, chain)
             except Exception as e:
                 logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
-                # 降级方案：发送纯文本链接
+                # 降级时也不发送包含 key 的 URL ，只发送文字提示
                 try:
                     unified_msg_origin = self._build_unified_msg_origin(group_id)
                     await self.context.send_message(
                         unified_msg_origin,
-                        f"🌟 光遇今日每日任务\n\n图片链接：{image_url}"
+                        "🌟 光遇今日每日任务\n\n⚠️ 图片发送失败，请使用「每日任务」命令手动查询"
                     )
                 except Exception as e2:
-                    logger.error(f"降级发送文本也失败: {e2}")
+                    logger.error(f"降级发送也失败: {e2}")
         
-        # 并发发送给所有群组
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _push_grandma_reminder(self):
-        """推送老奶奶用餐提醒（并发发送，避免阻塞）"""
+        """推送老奶奶用餐提醒"""
         if not self.push_groups:
             return
         
@@ -1165,7 +1238,6 @@ class SkyPlugin(Star):
         
         async def send_to_group(group_id: str):
             try:
-                # [修复] 构造 unified_msg_origin，支持多平台适配
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 await self.context.send_message(unified_msg_origin, message)
             except Exception as e:
@@ -1175,7 +1247,7 @@ class SkyPlugin(Star):
         await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _push_sacrifice_reminder(self):
-        """推送献祭刷新提醒（并发发送，避免阻塞）"""
+        """推送献祭刷新提醒"""
         if not self.push_groups:
             return
         
@@ -1185,7 +1257,6 @@ class SkyPlugin(Star):
         
         async def send_to_group(group_id: str):
             try:
-                # [修复] 构造 unified_msg_origin，支持多平台适配
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 await self.context.send_message(unified_msg_origin, message)
             except Exception as e:
@@ -1195,7 +1266,7 @@ class SkyPlugin(Star):
         await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _push_debris_info(self):
-        """推送碎石信息（并发发送，避免阻塞）"""
+        """推送碎石信息"""
         if not self.push_groups:
             return
         
@@ -1209,7 +1280,6 @@ class SkyPlugin(Star):
         
         async def send_to_group(group_id: str):
             try:
-                # [修复] 构造 unified_msg_origin，支持多平台适配
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 await self.context.send_message(unified_msg_origin, message)
             except Exception as e:
