@@ -8,7 +8,6 @@ import json
 import random
 import time
 import re
-import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -599,102 +598,102 @@ class SkyPlugin(Star):
     
     @filter.llm_tool(name="get_sky_daily_tasks")
     async def tool_get_daily_tasks(self, event: AstrMessageEvent):
-        '''获取光遇今日每日任务图片
+        """获取光遇今日每日任务图片
         
         当用户询问"今天有什么任务"、"每日任务是什么"、"光遇任务"时使用此工具。
-        '''
+        """
         yield event.plain_result("🌟 光遇今日每日任务")
         yield event.image_result(self._get_daily_task_image_url())
     
     @filter.llm_tool(name="get_sky_season_candles")
     async def tool_get_season_candles(self, event: AstrMessageEvent):
-        '''获取光遇季节蜡烛位置图片
+        """获取光遇季节蜡烛位置图片
         
         当用户询问"季节蜡烛在哪里"、"季蜡位置"、"季节蜡烛"时使用此工具。
-        '''
+        """
         yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
         yield event.image_result(self._get_season_candle_image_url())
     
     @filter.llm_tool(name="get_sky_big_candles")
     async def tool_get_big_candles(self, event: AstrMessageEvent):
-        '''获取光遇大蜡烛位置图片
+        """获取光遇大蜡烛位置图片
         
         当用户询问"大蜡烛在哪里"、"大蜡位置"、"大蜡烛"时使用此工具。
-        '''
+        """
         yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
         yield event.image_result(self._get_big_candle_image_url())
     
     @filter.llm_tool(name="get_sky_free_magic")
     async def tool_get_free_magic(self, event: AstrMessageEvent):
-        '''获取光遇免费魔法图片
+        """获取光遇免费魔法图片
         
         当用户询问"今天有什么魔法"、"免费魔法"、"魔法"时使用此工具。
-        '''
+        """
         yield event.plain_result("✨ 光遇今日免费魔法")
         yield event.image_result(self._get_magic_image_url())
     
     @filter.llm_tool(name="get_sky_season_progress")
     async def tool_get_season_progress(self, event: AstrMessageEvent):
-        '''获取当前季节进度信息
+        """获取当前季节进度信息
         
         当用户询问"现在是什么季节"、"季节还有多久结束"、"季节进度"时使用此工具。
-        '''
+        """
         data = await self._get_season_progress_data()
         result = self._format_season_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_debris_info")
     async def tool_get_debris_info(self, event: AstrMessageEvent):
-        '''获取今日碎石信息
+        """获取今日碎石信息
         
         当用户询问"今天碎石在哪里"、"碎石是什么类型"、"碎石"时使用此工具。
-        '''
+        """
         data = await self._get_debris_info_data()
         result = self._format_debris_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_traveling_spirit")
     async def tool_get_traveling_spirit(self, event: AstrMessageEvent):
-        '''获取复刻先祖信息
+        """获取复刻先祖信息
         
         当用户询问"复刻先祖是谁"、"复刻有什么物品"、"复刻"时使用此工具。
-        '''
+        """
         data = await self._get_traveling_spirit_data()
         result = self._format_traveling_spirit_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_sacrifice_info")
     async def tool_get_sacrifice_info(self, event: AstrMessageEvent):
-        '''获取献祭相关信息
+        """获取献祭相关信息
         
         当用户询问"献祭什么时候刷新"、"献祭有什么奖励"、"献祭"时使用此工具。
-        '''
+        """
         yield event.plain_result(SACRIFICE_INFO_TEXT)
     
     @filter.llm_tool(name="get_sky_grandma_schedule")
     async def tool_get_grandma_schedule(self, event: AstrMessageEvent):
-        '''获取老奶奶用餐时间表
+        """获取老奶奶用餐时间表
         
         当用户询问"老奶奶什么时候开饭"、"老奶奶在哪里"、"老奶奶"时使用此工具。
-        '''
+        """
         yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
     
     @filter.llm_tool(name="get_sky_wing_count")
     async def tool_get_wing_count(self, event: AstrMessageEvent):
-        '''获取光遇全图光翼统计
+        """获取光遇全图光翼统计
         
         当用户询问"光翼有多少个"、"全图光翼"、"光翼统计"时使用此工具。
-        '''
+        """
         data = await self._get_wing_count_data()
         result = self._format_wing_count_result(data)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_server_status")
     async def tool_get_server_status(self, event: AstrMessageEvent):
-        '''获取光遇服务器状态
+        """获取光遇服务器状态
         
         当用户询问"光遇服务器状态"、"光遇排队"、"服务器"时使用此工具。
-        '''
+        """
         data = await self._get_server_status_data()
         result = self._format_server_status_result(data)
         yield event.plain_result(result)
@@ -839,7 +838,7 @@ class SkyPlugin(Star):
         return "\n".join(lines) + "\n" if lines else ""
     
     @filter.command("光翼查询")
-    async def query_wings(self, event: AstrMessageEvent, sky_id: str = None):
+    async def query_wings(self, event: AstrMessageEvent, sky_id: Optional[str] = None):
         """查询光翼信息"""
         user_id = event.get_sender_id()
         
