@@ -11,11 +11,49 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 import aiohttp
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import AstrBotConfig, logger
+
+
+# 常量定义
+SACRIFICE_INFO_TEXT = """🔥 献祭信息
+
+📅 刷新时间: 每周六 00:00
+📍 位置: 暴风眼（伊甸之眼）
+
+📖 献祭是光遇中获取升华蜡烛的主要途径
+
+🎁 献祭奖励:
+   • 升华蜡烛（用于解锁先祖节点）
+   • 每周最多约15根升华蜡烛
+
+💡 小贴士:
+   • 进入暴风眼需要20+光翼
+   • 献祭时尽量点亮更多石像
+   • 可以组队献祭互相照亮
+   • 注意躲避冥龙，被照到会损失光翼"""
+
+GRANDMA_SCHEDULE_TEXT = """🍲 老奶奶用餐信息
+
+📍 位置: 雨林隐藏图（秘密花园）
+📖 雨林老奶奶会在用餐时间提供烛火
+
+⏰ 用餐时间:
+   • 08:00 - 08:30
+   • 10:00 - 10:30
+   • 12:00 - 12:30
+   • 16:00 - 16:30
+   • 18:00 - 18:30
+   • 20:00 - 20:30
+
+💡 小贴士:
+   • 带上火盆或火把可以自动收集烛火
+   • 可以挂机收集
+   • 每次约可获得1000+烛火（约10根蜡烛）"""
 
 
 class SkyPlugin(Star):
@@ -38,9 +76,6 @@ class SkyPlugin(Star):
         # 从配置读取 API Key
         self.sky_api_key = config.get("sky_api_key", "")
         self.wing_query_key = config.get("wing_query_key", "")
-        
-        # LLM配置
-        self.llm_provider_id = config.get("llm_provider_id", "")
         
         # 推送配置
         self.enable_daily_task_push = config.get("enable_daily_task_push", True)
@@ -176,7 +211,6 @@ class SkyPlugin(Star):
     
     def _mask_url(self, url: str) -> str:
         """隐藏 URL 中的敏感信息（API Key）"""
-        # 替换 key 参数值
         masked = re.sub(r'([&?]key=)[^&]+', r'\1***', url)
         return masked
     
@@ -194,13 +228,19 @@ class SkyPlugin(Star):
             async with self._session.get(url) as resp:
                 if resp.status == 200:
                     text = await resp.text()
-                    data = json.loads(text)
-                    # 设置缓存
-                    if use_cache and cache_key:
-                        self._set_cache(cache_key, data)
-                    return data
+                    try:
+                        data = json.loads(text)
+                        # 设置缓存
+                        if use_cache and cache_key:
+                            self._set_cache(cache_key, data)
+                        return data
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON解析失败 ({self._mask_url(url)}): {e}, 响应片段: {text[:200]}")
+                        return None
+                else:
+                    logger.error(f"请求失败 ({self._mask_url(url)}): HTTP {resp.status}")
+                    return None
         except Exception as e:
-            # 使用脱敏后的 URL 打印日志
             logger.error(f"获取数据失败 ({self._mask_url(url)}): {e}")
         return None
     
@@ -456,6 +496,28 @@ class SkyPlugin(Star):
         result += "\n💡 数据来源: 网易大神"
         return result
     
+    # ==================== 图片URL生成（统一处理）====================
+    
+    def _get_daily_task_image_url(self) -> str:
+        """获取每日任务图片URL"""
+        rand = random.randint(0, 1000000)
+        return f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
+    
+    def _get_season_candle_image_url(self) -> str:
+        """获取季节蜡烛图片URL"""
+        rand = random.randint(0, 1000000)
+        return f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
+    
+    def _get_big_candle_image_url(self) -> str:
+        """获取大蜡烛图片URL"""
+        rand = random.randint(0, 1000000)
+        return f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
+    
+    def _get_magic_image_url(self) -> str:
+        """获取免费魔法图片URL"""
+        rand = random.randint(0, 1000000)
+        return f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
+    
     # ==================== LLM工具函数 ====================
     
     @filter.llm_tool(name="get_sky_daily_tasks")
@@ -464,10 +526,8 @@ class SkyPlugin(Star):
         
         当用户询问"今天有什么任务"、"每日任务是什么"、"光遇任务"时使用此工具。
         '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_daily_task_image_url())
     
     @filter.llm_tool(name="get_sky_season_candles")
     async def tool_get_season_candles(self, event: AstrMessageEvent):
@@ -475,10 +535,8 @@ class SkyPlugin(Star):
         
         当用户询问"季节蜡烛在哪里"、"季蜡位置"、"季节蜡烛"时使用此工具。
         '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_season_candle_image_url())
     
     @filter.llm_tool(name="get_sky_big_candles")
     async def tool_get_big_candles(self, event: AstrMessageEvent):
@@ -486,10 +544,8 @@ class SkyPlugin(Star):
         
         当用户询问"大蜡烛在哪里"、"大蜡位置"、"大蜡烛"时使用此工具。
         '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_big_candle_image_url())
     
     @filter.llm_tool(name="get_sky_free_magic")
     async def tool_get_free_magic(self, event: AstrMessageEvent):
@@ -497,10 +553,8 @@ class SkyPlugin(Star):
         
         当用户询问"今天有什么魔法"、"免费魔法"、"魔法"时使用此工具。
         '''
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_magic_image_url())
     
     @filter.llm_tool(name="get_sky_season_progress")
     async def tool_get_season_progress(self, event: AstrMessageEvent):
@@ -538,19 +592,7 @@ class SkyPlugin(Star):
         
         当用户询问"献祭什么时候刷新"、"献祭有什么奖励"、"献祭"时使用此工具。
         '''
-        result = "🔥 献祭信息\n\n"
-        result += "📅 刷新时间: 每周六 00:00\n"
-        result += "📍 位置: 暴风眼（伊甸之眼）\n\n"
-        result += "📖 献祭是光遇中获取升华蜡烛的主要途径\n\n"
-        result += "🎁 献祭奖励:\n"
-        result += "   • 升华蜡烛（用于解锁先祖节点）\n"
-        result += "   • 每周最多约15根升华蜡烛\n\n"
-        result += "💡 小贴士:\n"
-        result += "   • 进入暴风眼需要20+光翼\n"
-        result += "   • 献祭时尽量点亮更多石像\n"
-        result += "   • 可以组队献祭互相照亮\n"
-        result += "   • 注意躲避冥龙，被照到会损失光翼"
-        yield event.plain_result(result)
+        yield event.plain_result(SACRIFICE_INFO_TEXT)
     
     @filter.llm_tool(name="get_sky_grandma_schedule")
     async def tool_get_grandma_schedule(self, event: AstrMessageEvent):
@@ -558,21 +600,7 @@ class SkyPlugin(Star):
         
         当用户询问"老奶奶什么时候开饭"、"老奶奶在哪里"、"老奶奶"时使用此工具。
         '''
-        result = "🍲 老奶奶用餐信息\n\n"
-        result += "📍 位置: 雨林隐藏图（秘密花园）\n"
-        result += "📖 雨林老奶奶会在用餐时间提供烛火\n\n"
-        result += "⏰ 用餐时间:\n"
-        result += "   • 08:00 - 08:30\n"
-        result += "   • 10:00 - 10:30\n"
-        result += "   • 12:00 - 12:30\n"
-        result += "   • 16:00 - 16:30\n"
-        result += "   • 18:00 - 18:30\n"
-        result += "   • 20:00 - 20:30\n\n"
-        result += "💡 小贴士:\n"
-        result += "   • 带上火盆或火把可以自动收集烛火\n"
-        result += "   • 可以挂机收集\n"
-        result += "   • 每次约可获得1000+烛火（约10根蜡烛）"
-        yield event.plain_result(result)
+        yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
     
     @filter.llm_tool(name="get_sky_wing_count")
     async def tool_get_wing_count(self, event: AstrMessageEvent):
@@ -687,7 +715,6 @@ class SkyPlugin(Star):
                     result += f" (缺{uncollected}个)"
                 result += "\n"
             else:
-                # 兼容旧格式
                 result += f"   {map_name}: {map_data}个\n"
         return result
     
@@ -706,7 +733,9 @@ class SkyPlugin(Star):
                     yield event.plain_result("⚠️ 请先使用「光遇切换 <序号>」设置当前ID！")
                 return
         
-        url = f"{self.WING_QUERY_API}?key={self.wing_query_key}&id={sky_id}&type=json"
+        # URL 编码用户输入，防止参数污染
+        encoded_id = quote(str(sky_id), safe='')
+        url = f"{self.WING_QUERY_API}?key={self.wing_query_key}&id={encoded_id}&type=json"
         data = await self._fetch_json(url, use_cache=False)
         
         if not data or not data.get("success"):
@@ -759,34 +788,26 @@ class SkyPlugin(Star):
     @filter.command("每日任务")
     async def daily_tasks(self, event: AstrMessageEvent):
         """获取每日任务图片"""
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_daily_task_image_url())
     
     @filter.command("季节蜡烛")
     async def season_candles(self, event: AstrMessageEvent):
         """获取季节蜡烛位置图片"""
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_season_candle_image_url())
     
     @filter.command("大蜡烛")
     async def big_candles(self, event: AstrMessageEvent):
         """获取大蜡烛位置图片"""
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_big_candle_image_url())
     
     @filter.command("免费魔法")
     async def free_magic(self, event: AstrMessageEvent):
         """获取免费魔法图片"""
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
         yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(image_url)
+        yield event.image_result(self._get_magic_image_url())
     
     @filter.command("季节进度")
     async def season_progress(self, event: AstrMessageEvent):
@@ -812,38 +833,12 @@ class SkyPlugin(Star):
     @filter.command("献祭信息")
     async def sacrifice_info(self, event: AstrMessageEvent):
         """获取献祭信息"""
-        result = "🔥 献祭信息\n\n"
-        result += "📅 刷新时间: 每周六 00:00\n"
-        result += "📍 位置: 暴风眼（伊甸之眼）\n\n"
-        result += "📖 献祭是光遇中获取升华蜡烛的主要途径\n\n"
-        result += "🎁 献祭奖励:\n"
-        result += "   • 升华蜡烛（用于解锁先祖节点）\n"
-        result += "   • 每周最多约15根升华蜡烛\n\n"
-        result += "💡 小贴士:\n"
-        result += "   • 进入暴风眼需要20+光翼\n"
-        result += "   • 献祭时尽量点亮更多石像\n"
-        result += "   • 可以组队献祭互相照亮\n"
-        result += "   • 注意躲避冥龙，被照到会损失光翼"
-        yield event.plain_result(result)
+        yield event.plain_result(SACRIFICE_INFO_TEXT)
     
     @filter.command("老奶奶时间")
     async def grandma_schedule(self, event: AstrMessageEvent):
         """获取老奶奶用餐时间"""
-        result = "🍲 老奶奶用餐信息\n\n"
-        result += "📍 位置: 雨林隐藏图（秘密花园）\n"
-        result += "📖 雨林老奶奶会在用餐时间提供烛火\n\n"
-        result += "⏰ 用餐时间:\n"
-        result += "   • 08:00 - 08:30\n"
-        result += "   • 10:00 - 10:30\n"
-        result += "   • 12:00 - 12:30\n"
-        result += "   • 16:00 - 16:30\n"
-        result += "   • 18:00 - 18:30\n"
-        result += "   • 20:00 - 20:30\n\n"
-        result += "💡 小贴士:\n"
-        result += "   • 带上火盆或火把可以自动收集烛火\n"
-        result += "   • 可以挂机收集\n"
-        result += "   • 每次约可获得1000+烛火（约10根蜡烛）"
-        yield event.plain_result(result)
+        yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
     
     @filter.command("光遇状态")
     async def server_status(self, event: AstrMessageEvent):
@@ -861,6 +856,7 @@ class SkyPlugin(Star):
                 now = self._get_beijing_time()
                 current_time = now.strftime("%H:%M")
                 current_minute = now.minute
+                current_hour = now.hour
                 current_date = now.strftime("%Y-%m-%d")
                 
                 # 每日任务推送
@@ -873,10 +869,9 @@ class SkyPlugin(Star):
                 # 老奶奶提醒（整点触发）
                 if self.enable_grandma_reminder:
                     grandma_key = f"grandma_{current_date}_{current_hour}"
-                    current_hour = now.hour
                     if current_minute == 0 and current_hour in [8, 10, 12, 16, 18, 20]:
-                        if self._last_executed.get(grandma_key) != current_hour:
-                            self._last_executed[grandma_key] = current_hour
+                        if self._last_executed.get(grandma_key) != str(current_hour):
+                            self._last_executed[grandma_key] = str(current_hour)
                             await self._push_grandma_reminder()
                 
                 # 献祭刷新提醒（周六00:00）
@@ -907,14 +902,10 @@ class SkyPlugin(Star):
         if not self.push_groups:
             return
         
-        rand = random.randint(0, 1000000)
-        image_url = f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
-        
         for group_id in self.push_groups:
             try:
-                # 使用统一的图片发送方式
                 await self.context.send_message(group_id, "🌟 光遇今日每日任务")
-                await self.context.send_message(group_id, image_url)
+                await self.context.send_message(group_id, self._get_daily_task_image_url())
             except Exception as e:
                 logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
     
