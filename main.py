@@ -775,11 +775,88 @@ class SkyPlugin(Star):
         """获取老奶奶用餐时间表"""
         yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
     
-    @filter.llm_tool(name="get_sky_wing_count")
-    async def tool_get_wing_count(self, event: AstrMessageEvent):
-        """获取光遇全图光翼统计"""
+    # [修改] 重命名原工具：获取全图光翼总数统计（静态数据）
+    @filter.llm_tool(name="get_sky_wing_total_count")
+    async def tool_get_wing_total_count(self, event: AstrMessageEvent):
+        """获取光遇全图光翼的总数统计（静态数据，所有玩家通用）"""
         data = await self._get_wing_count_data()
         result = self._format_wing_count_result(data)
+        yield event.plain_result(result)
+    
+    # [新增] 查询个人光翼进度（与命令行"光翼查询"逻辑一致）
+    @filter.llm_tool(name="query_user_wings")
+    async def tool_query_user_wings(self, event: AstrMessageEvent, sky_id: Optional[str] = None):
+        """查询用户个人的光翼收集进度，包括每个地图已收集和未收集的详细统计"""
+        # 检查 API key
+        if not self.wing_query_key:
+            yield event.plain_result("❌ 管理员未配置 wing_query_key，请联系管理员配置光翼查询API密钥")
+            return
+        
+        user_id = event.get_sender_id()
+        
+        # 如果没有提供 sky_id，尝试获取绑定的当前ID
+        if sky_id is None:
+            user_data = await self._get_user_sky_data(user_id)
+            
+            if "_error" in user_data:
+                yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+                return
+            
+            sky_id = user_data.get("current_id")
+            if not sky_id:
+                if not user_data["ids"]:
+                    yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定\n\n💡 Tips：这里需要绑定游戏内短ID哦")
+                else:
+                    yield event.plain_result("⚠️ 请先使用「光遇切换 <序号>」设置当前ID！")
+                return
+        
+        # URL 编码用户输入，防止参数污染
+        encoded_id = quote(str(sky_id), safe='')
+        url = f"{self.WING_QUERY_API}?key={self.wing_query_key}&id={encoded_id}&type=json"
+        data = await self._fetch_json(url, use_cache=False)
+        
+        if not data or not data.get("success"):
+            error_msg = data.get("message", "未知错误") if data else "网络请求失败"
+            yield event.plain_result(f"❌ 查询失败：{error_msg}")
+            return
+        
+        statistics = data.get("statistics", {})
+        role_id = data.get("roleId", "未知")
+        timestamp = data.get("timestamp", "")
+        
+        # 格式化时间戳
+        time_str = timestamp
+        if "T" in timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                pass
+        
+        result = f"🪽 光翼查询结果\n"
+        result += f"📍 ID: {role_id}\n"
+        result += f"🕐 数据时间: {time_str}\n\n"
+        
+        total = statistics.get("total", 0)
+        collected = statistics.get("collected", 0)
+        uncollected = statistics.get("uncollected", 0)
+        
+        result += f"📊 光翼统计:\n"
+        result += f"   总数: {total}\n"
+        result += f"   已收集: {collected}\n"
+        result += f"   未收集: {uncollected}\n\n"
+        
+        # 各地图详细统计
+        map_stats = statistics.get("map_statistics", {})
+        if map_stats:
+            result += "📍 各地图光翼详情:\n"
+            result += self._format_wing_map_stats(map_stats)
+        
+        # 计算总进度百分比
+        if total > 0:
+            percentage = (collected / total) * 100
+            result += f"\n📈 总进度: {percentage:.1f}% ({collected}/{total})"
+        
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_sky_server_status")
