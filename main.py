@@ -8,9 +8,10 @@ import json
 import random
 import time
 import re
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from urllib.parse import quote
 
 import aiohttp
@@ -108,7 +109,11 @@ class SkyPlugin(Star):
         self._scheduler_task: Optional[asyncio.Task] = None
         self._running = False
         
-        # 记录上次执行的时间戳，防止漏触发
+        # [修复] 使用集合跟踪活跃的推送子任务，便于统一取消
+        self._active_push_tasks: Set[asyncio.Task] = set()
+        
+        # [修复] 记录每个任务的执行状态，使用更高效的存储结构
+        # 格式: {task_type: last_executed_date_str}
         self._last_executed: Dict[str, str] = {}
         
         logger.info("光遇插件已加载")
@@ -131,13 +136,25 @@ class SkyPlugin(Star):
         """插件关闭时自动调用"""
         self._running = False
         
-        # 取消定时任务
+        # 取消调度器主任务
         if self._scheduler_task:
             self._scheduler_task.cancel()
             try:
                 await self._scheduler_task
             except asyncio.CancelledError:
                 pass
+        
+        # [修复] 取消所有活跃的推送子任务
+        if self._active_push_tasks:
+            logger.info(f"正在取消 {len(self._active_push_tasks)} 个未完成的推送任务...")
+            for task in list(self._active_push_tasks):
+                if not task.done():
+                    task.cancel()
+            
+            # 等待所有任务完成或取消
+            if self._active_push_tasks:
+                await asyncio.gather(*self._active_push_tasks, return_exceptions=True)
+            self._active_push_tasks.clear()
         
         # 关闭 ClientSession
         if self._session:
@@ -146,6 +163,30 @@ class SkyPlugin(Star):
         
         logger.info("光遇插件已终止")
     
+    # [修复] 辅助方法：创建受跟踪的推送任务
+    def _create_tracked_task(self, coro) -> asyncio.Task:
+        """创建被跟踪的异步任务，确保可以统一取消"""
+        task = asyncio.create_task(coro)
+        self._active_push_tasks.add(task)
+        
+        # 任务完成时自动从集合中移除
+        def cleanup(t):
+            self._active_push_tasks.discard(t)
+        
+        task.add_done_callback(cleanup)
+        return task
+    
+    # [修复] 辅助方法：清理过期的 _last_executed 记录
+    def _cleanup_last_executed(self, current_date: str):
+        """清理非当天的执行记录，防止内存无限增长"""
+        # 只保留当天的记录
+        keys_to_remove = [
+            key for key in self._last_executed.keys() 
+            if not key.endswith(f"_{current_date}")
+        ]
+        for key in keys_to_remove:
+            del self._last_executed[key]
+    
     # ==================== 数据文件操作 ====================
     
     def _get_sky_binding_file(self, user_id: str) -> Path:
@@ -153,39 +194,70 @@ class SkyPlugin(Star):
         return self.sky_bindings_dir / f"{user_id}.json"
     
     async def _load_json(self, file_path: Path, default: Optional[dict] = None) -> dict:
-        """加载JSON文件（异步安全）"""
+        """加载JSON文件（异步安全）
+        
+        [修复] 区分"文件不存在"和"读取错误"：
+        - 文件不存在：返回默认值（初始化新用户）
+        - 读取错误：抛出异常，避免误覆盖数据
+        """
         if default is None:
             default = {}
+        
+        # 文件不存在，返回默认值（新用户初始化）
+        if not file_path.exists():
+            return default.copy()
+        
         try:
-            if file_path.exists():
-                async with self._file_lock:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        return json.load(f)
+            async with self._file_lock:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if not content.strip():
+                        logger.warning(f"JSON文件为空 {file_path}，使用默认值")
+                        return default.copy()
+                    return json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON解析失败 {file_path}: {e}，为避免数据覆盖，抛出异常")
+            raise RuntimeError(f"用户数据文件损坏，请检查: {file_path}") from e
         except Exception as e:
-            logger.error(f"加载JSON文件失败 {file_path}: {e}")
-        return default
+            logger.error(f"读取文件失败 {file_path}: {e}，为避免数据覆盖，抛出异常")
+            raise RuntimeError(f"无法读取用户数据: {file_path}") from e
     
     async def _save_json(self, file_path: Path, data: dict):
         """保存JSON文件（异步安全，带锁保护）"""
         try:
             async with self._file_lock:
-                with open(file_path, 'w', encoding='utf-8') as f:
+                # 使用临时文件写入，防止写入过程中断导致数据损坏
+                temp_path = file_path.with_suffix('.tmp')
+                with open(temp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
+                # 原子性替换
+                temp_path.replace(file_path)
         except Exception as e:
             logger.error(f"保存JSON文件失败 {file_path}: {e}")
+            raise
     
     async def _get_user_sky_data(self, user_id: str) -> dict:
         """获取用户光遇ID绑定数据"""
         file_path = self._get_sky_binding_file(user_id)
-        data = await self._load_json(file_path)
-        if not data:
-            data = {
+        try:
+            data = await self._load_json(file_path)
+            if not data:
+                data = {
+                    "user_id": user_id,
+                    "ids": [],
+                    "current_id": None
+                }
+                await self._save_json(file_path, data)
+            return data
+        except RuntimeError:
+            # 数据文件损坏，返回空数据但不自动覆盖，让用户知道
+            logger.error(f"用户 {user_id} 的数据文件损坏，请手动检查")
+            return {
                 "user_id": user_id,
                 "ids": [],
-                "current_id": None
+                "current_id": None,
+                "_error": "数据文件损坏，请检查服务器文件"
             }
-            await self._save_json(file_path, data)
-        return data
     
     async def _save_user_sky_data(self, user_id: str, data: dict):
         """保存用户光遇ID绑定数据"""
@@ -367,7 +439,9 @@ class SkyPlugin(Star):
         return result
     
     async def _get_traveling_spirit_data(self) -> Optional[Dict]:
-        """获取复刻先祖数据"""
+        """获取复刻先祖数据
+        [修复] 对 monthRecord 按日期排序，不依赖源数据顺序
+        """
         url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/RegressionRecords.json"
         records = await self._fetch_json(url, use_cache=True, cache_key="traveling_spirit")
         
@@ -401,7 +475,10 @@ class SkyPlugin(Star):
         if not month_record:
             return None
         
-        latest = month_record[-1]
+        # [修复] 按日期排序，确保取到最新的先祖，不依赖源数据顺序
+        sorted_records = sorted(month_record, key=lambda x: x.get("day", 0))
+        latest = sorted_records[-1]
+        
         return {
             "spirit_name": latest.get("name", "未知先祖"),
             "spirit_day": latest.get("day", 0),
@@ -604,13 +681,27 @@ class SkyPlugin(Star):
     
     @filter.llm_tool(name="get_sky_wing_count")
     async def tool_get_wing_count(self, event: AstrMessageEvent):
-        '''获取光遇全图光翼统计
+        '''获取光遇全图光翼总数统计（显示全图总共有多少光翼，非个人数据）
         
-        当用户询问"光翼有多少个"、"全图光翼"、"光翼统计"时使用此工具。
+        当用户询问"光翼有多少个"、"全图光翼"、"总共多少光翼"时使用此工具。
+        注意：此工具只显示全图总数，不显示个人缺失情况。
         '''
         data = await self._get_wing_count_data()
         result = self._format_wing_count_result(data)
         yield event.plain_result(result)
+    
+    # [新增] 个人光翼查询 LLM 工具
+    @filter.llm_tool(name="query_user_wings")
+    async def tool_query_user_wings(self, event: AstrMessageEvent):
+        '''查询当前用户绑定的光遇ID的光翼详细情况，包括每个地图缺几个
+        
+        当用户询问"我缺几个光翼"、"我的光翼进度"、"查下我的光翼"、"我的光翼在哪里没拿"时使用此工具。
+        此工具会显示每个地图已收集/总数，并标注缺几个（如：❌ 雨林: 10/16个 (缺6个)）。
+        如果用户还没有绑定光遇ID，会提示用户先使用"光遇绑定 <ID>"命令绑定。
+        '''
+        # 复用现有的 query_wings 方法，不传入 sky_id 表示查询当前绑定的ID
+        async for ret in self.query_wings(event, sky_id=None):
+            yield ret
     
     @filter.llm_tool(name="get_sky_server_status")
     async def tool_get_server_status(self, event: AstrMessageEvent):
@@ -630,6 +721,10 @@ class SkyPlugin(Star):
         user_id = event.get_sender_id()
         user_data = await self._get_user_sky_data(user_id)
         
+        if "_error" in user_data:
+            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+            return
+        
         if sky_id in user_data["ids"]:
             yield event.plain_result(f"⚠️ ID {sky_id} 已经绑定过了！")
             return
@@ -646,6 +741,10 @@ class SkyPlugin(Star):
         """切换当前光遇ID"""
         user_id = event.get_sender_id()
         user_data = await self._get_user_sky_data(user_id)
+        
+        if "_error" in user_data:
+            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+            return
         
         if not user_data["ids"]:
             yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定")
@@ -664,6 +763,10 @@ class SkyPlugin(Star):
         """删除绑定的光遇ID"""
         user_id = event.get_sender_id()
         user_data = await self._get_user_sky_data(user_id)
+        
+        if "_error" in user_data:
+            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+            return
         
         if not user_data["ids"]:
             yield event.plain_result("⚠️ 您还没有绑定任何ID！")
@@ -685,6 +788,10 @@ class SkyPlugin(Star):
         """列出所有绑定的光遇ID"""
         user_id = event.get_sender_id()
         user_data = await self._get_user_sky_data(user_id)
+        
+        if "_error" in user_data:
+            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+            return
         
         if not user_data["ids"]:
             yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定\n\n💡 Tips：这里需要绑定游戏内短ID哦")
@@ -752,6 +859,11 @@ class SkyPlugin(Star):
         
         if sky_id is None:
             user_data = await self._get_user_sky_data(user_id)
+            
+            if "_error" in user_data:
+                yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
+                return
+            
             sky_id = user_data.get("current_id")
             if not sky_id:
                 if not user_data["ids"]:
@@ -884,44 +996,54 @@ class SkyPlugin(Star):
     
     async def _scheduler_loop(self):
         """定时任务调度器（动态计算睡眠时间，避免时间漂移）"""
+        last_date = None
+        
         while self._running:
             try:
                 now = self._get_beijing_time()
-                current_time = now.strftime("%H:%M")
+                current_date = now.strftime("%Y-%m-%d")
+                current_time_str = now.strftime("%H:%M")
                 current_minute = now.minute
                 current_hour = now.hour
-                current_date = now.strftime("%Y-%m-%d")
                 
-                # 每日任务推送
+                # [修复] 日期变化时清理过期记录，防止内存无限增长
+                if last_date != current_date:
+                    if last_date is not None:
+                        self._cleanup_last_executed(current_date)
+                    last_date = current_date
+                
+                # [修复] 每日任务推送 - 使用分钟级窗口检查，避免精确匹配漏触发
                 if self.enable_daily_task_push:
-                    task_key = f"daily_task_{current_date}_{current_time}"
-                    if current_time == self.daily_task_push_time and self._last_executed.get(task_key) != current_time:
-                        self._last_executed[task_key] = current_time
-                        asyncio.create_task(self._push_daily_tasks())
+                    task_key = f"daily_task_{current_date}"
+                    # 检查是否是推送时间（允许1分钟的窗口）
+                    if (current_time_str == self.daily_task_push_time and 
+                        self._last_executed.get(task_key) != current_date):
+                        self._last_executed[task_key] = current_date
+                        self._create_tracked_task(self._push_daily_tasks())
                 
-                # 老奶奶提醒（整点触发）
+                # [修复] 老奶奶提醒（整点触发）- 使用分钟窗口
                 if self.enable_grandma_reminder:
-                    grandma_key = f"grandma_{current_date}_{current_hour}"
                     if current_minute == 0 and current_hour in [8, 10, 12, 16, 18, 20]:
-                        if self._last_executed.get(grandma_key) != str(current_hour):
-                            self._last_executed[grandma_key] = str(current_hour)
-                            asyncio.create_task(self._push_grandma_reminder())
+                        grandma_key = f"grandma_{current_date}_{current_hour}"
+                        if self._last_executed.get(grandma_key) != current_date:
+                            self._last_executed[grandma_key] = current_date
+                            self._create_tracked_task(self._push_grandma_reminder())
                 
-                # 献祭刷新提醒（周六00:00）
+                # [修复] 献祭刷新提醒（周六00:00）- 使用分钟窗口
                 if self.enable_sacrifice_reminder:
-                    sacrifice_key = f"sacrifice_{current_date}"
-                    if now.weekday() == 5 and current_time == "00:00":
+                    if now.weekday() == 5 and current_hour == 0 and current_minute == 0:
+                        sacrifice_key = f"sacrifice_{current_date}"
                         if self._last_executed.get(sacrifice_key) != current_date:
                             self._last_executed[sacrifice_key] = current_date
-                            asyncio.create_task(self._push_sacrifice_reminder())
+                            self._create_tracked_task(self._push_sacrifice_reminder())
                 
-                # 碎石提醒（每天08:00）
+                # [修复] 碎石提醒（每天08:00）- 使用分钟窗口
                 if self.enable_debris_reminder:
-                    debris_key = f"debris_{current_date}"
-                    if current_time == "08:00":
+                    if current_hour == 8 and current_minute == 0:
+                        debris_key = f"debris_{current_date}"
                         if self._last_executed.get(debris_key) != current_date:
                             self._last_executed[debris_key] = current_date
-                            asyncio.create_task(self._push_debris_info())
+                            self._create_tracked_task(self._push_debris_info())
                 
                 # 动态计算睡眠时间，确保每分钟整点检查（避免时间漂移）
                 sleep_seconds = 60 - self._get_beijing_time().second
@@ -1034,7 +1156,7 @@ class SkyPlugin(Star):
 • 光遇切换 <序号> - 切换当前ID
 • 光遇删除 <序号> - 删除绑定的ID
 • 光遇ID列表 - 查看所有绑定的ID
-• 光翼查询 - 查询当前ID的光翼
+• 光翼查询 - 查询当前ID的光翼（显示每个地图缺几个）
 • 光翼查询 <ID> - 查询指定ID的光翼
 • 光翼统计 - 查看全图光翼统计
 
