@@ -7,6 +7,7 @@ import asyncio
 import json
 import random
 import time
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -72,6 +73,9 @@ class SkyPlugin(Star):
         self._scheduler_task: Optional[asyncio.Task] = None
         self._running = False
         
+        # 记录上次执行的时间戳，防止漏触发
+        self._last_executed: Dict[str, str] = {}
+        
         logger.info("光遇插件已加载")
     
     async def initialize(self):
@@ -82,8 +86,9 @@ class SkyPlugin(Star):
         )
         self._running = True
         
-        # 启动定时任务调度器
-        if self.enable_daily_task_push or self.enable_grandma_reminder:
+        # 启动定时任务调度器（只要有任意一个提醒功能开启就启动）
+        if (self.enable_daily_task_push or self.enable_grandma_reminder or 
+            self.enable_sacrifice_reminder or self.enable_debris_reminder):
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
             logger.info("光遇定时任务调度器已启动")
     
@@ -169,6 +174,12 @@ class SkyPlugin(Star):
     
     # ==================== API请求 ====================
     
+    def _mask_url(self, url: str) -> str:
+        """隐藏 URL 中的敏感信息（API Key）"""
+        # 替换 key 参数值
+        masked = re.sub(r'([&?]key=)[^&]+', r'\1***', url)
+        return masked
+    
     async def _fetch_json(self, url: str, use_cache: bool = True, cache_key: Optional[str] = None) -> Optional[Dict]:
         """从URL获取JSON数据"""
         # 检查缓存
@@ -189,7 +200,8 @@ class SkyPlugin(Star):
                         self._set_cache(cache_key, data)
                     return data
         except Exception as e:
-            logger.error(f"获取数据失败 ({url}): {e}")
+            # 使用脱敏后的 URL 打印日志
+            logger.error(f"获取数据失败 ({self._mask_url(url)}): {e}")
         return None
     
     # ==================== 时间工具 ====================
@@ -659,6 +671,26 @@ class SkyPlugin(Star):
     
     # ==================== 光翼查询功能 ====================
     
+    def _format_wing_map_stats(self, map_stats: Dict) -> str:
+        """格式化光翼地图统计为可读文本"""
+        if not map_stats:
+            return ""
+        
+        result = ""
+        for map_name, map_data in map_stats.items():
+            if isinstance(map_data, dict):
+                total = map_data.get("total", 0)
+                collected = map_data.get("collected", 0)
+                uncollected = map_data.get("uncollected", 0)
+                result += f"   {map_name}: {collected}/{total}个"
+                if uncollected > 0:
+                    result += f" (缺{uncollected}个)"
+                result += "\n"
+            else:
+                # 兼容旧格式
+                result += f"   {map_name}: {map_data}个\n"
+        return result
+    
     @filter.command("光翼查询")
     async def query_wings(self, event: AstrMessageEvent, sky_id: str = None):
         """查询光翼信息"""
@@ -686,9 +718,18 @@ class SkyPlugin(Star):
         role_id = data.get("roleId", "未知")
         timestamp = data.get("timestamp", "")
         
+        # 格式化时间戳
+        time_str = timestamp
+        if "T" in timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                pass
+        
         result = f"🪽 光翼查询结果\n"
         result += f"📍 ID: {role_id}\n"
-        result += f"🕐 数据时间: {timestamp}\n\n"
+        result += f"🕐 数据时间: {time_str}\n\n"
         
         total = statistics.get("total", 0)
         collected = statistics.get("collected", 0)
@@ -702,8 +743,7 @@ class SkyPlugin(Star):
         map_stats = statistics.get("map_statistics", {})
         if map_stats:
             result += "📍 各地图光翼:\n"
-            for map_name, count in map_stats.items():
-                result += f"   {map_name}: {count}个\n"
+            result += self._format_wing_map_stats(map_stats)
         
         yield event.plain_result(result)
     
@@ -821,22 +861,39 @@ class SkyPlugin(Star):
                 now = self._get_beijing_time()
                 current_time = now.strftime("%H:%M")
                 current_minute = now.minute
+                current_date = now.strftime("%Y-%m-%d")
                 
                 # 每日任务推送
-                if self.enable_daily_task_push and current_time == self.daily_task_push_time:
-                    await self._push_daily_tasks()
+                if self.enable_daily_task_push:
+                    task_key = f"daily_task_{current_date}_{current_time}"
+                    if current_time == self.daily_task_push_time and self._last_executed.get(task_key) != current_time:
+                        self._last_executed[task_key] = current_time
+                        await self._push_daily_tasks()
                 
-                # 老奶奶提醒
-                if self.enable_grandma_reminder and current_minute == 0:
-                    await self._check_grandma_reminder()
+                # 老奶奶提醒（整点触发）
+                if self.enable_grandma_reminder:
+                    grandma_key = f"grandma_{current_date}_{current_hour}"
+                    current_hour = now.hour
+                    if current_minute == 0 and current_hour in [8, 10, 12, 16, 18, 20]:
+                        if self._last_executed.get(grandma_key) != current_hour:
+                            self._last_executed[grandma_key] = current_hour
+                            await self._push_grandma_reminder()
                 
-                # 献祭刷新提醒
-                if self.enable_sacrifice_reminder and now.weekday() == 5 and current_time == "00:00":
-                    await self._push_sacrifice_reminder()
+                # 献祭刷新提醒（周六00:00）
+                if self.enable_sacrifice_reminder:
+                    sacrifice_key = f"sacrifice_{current_date}"
+                    if now.weekday() == 5 and current_time == "00:00":
+                        if self._last_executed.get(sacrifice_key) != current_date:
+                            self._last_executed[sacrifice_key] = current_date
+                            await self._push_sacrifice_reminder()
                 
-                # 碎石提醒
-                if self.enable_debris_reminder and current_time == "08:00":
-                    await self._push_debris_info()
+                # 碎石提醒（每天08:00）
+                if self.enable_debris_reminder:
+                    debris_key = f"debris_{current_date}"
+                    if current_time == "08:00":
+                        if self._last_executed.get(debris_key) != current_date:
+                            self._last_executed[debris_key] = current_date
+                            await self._push_debris_info()
                 
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
@@ -855,30 +912,27 @@ class SkyPlugin(Star):
         
         for group_id in self.push_groups:
             try:
+                # 使用统一的图片发送方式
                 await self.context.send_message(group_id, "🌟 光遇今日每日任务")
                 await self.context.send_message(group_id, image_url)
             except Exception as e:
                 logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
     
-    async def _check_grandma_reminder(self):
-        """检查老奶奶用餐提醒"""
-        grandma_hours = [8, 10, 12, 16, 18, 20]
-        current_hour = self._get_beijing_time().hour
+    async def _push_grandma_reminder(self):
+        """推送老奶奶用餐提醒"""
+        if not self.push_groups:
+            return
         
-        if current_hour in grandma_hours:
-            if not self.push_groups:
-                return
-            
-            message = "🍲 老奶奶开饭啦！\n\n"
-            message += "📍 位置: 雨林隐藏图\n"
-            message += "⏰ 用餐时间约30分钟\n"
-            message += "💡 带上火盆或火把可以自动收集烛火哦~"
-            
-            for group_id in self.push_groups:
-                try:
-                    await self.context.send_message(group_id, message)
-                except Exception as e:
-                    logger.error(f"推送老奶奶提醒到群组 {group_id} 失败: {e}")
+        message = "🍲 老奶奶开饭啦！\n\n"
+        message += "📍 位置: 雨林隐藏图\n"
+        message += "⏰ 用餐时间约30分钟\n"
+        message += "💡 带上火盆或火把可以自动收集烛火哦~"
+        
+        for group_id in self.push_groups:
+            try:
+                await self.context.send_message(group_id, message)
+            except Exception as e:
+                logger.error(f"推送老奶奶提醒到群组 {group_id} 失败: {e}")
     
     async def _push_sacrifice_reminder(self):
         """推送献祭刷新提醒"""
