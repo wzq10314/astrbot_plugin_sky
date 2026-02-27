@@ -114,7 +114,7 @@ class SkyPlugin(Star):
         logger.info("光遇插件已加载")
     
     async def initialize(self):
-        """插件激活时自动调用"""
+        """插件加载时自动调用"""
         # 创建共享的 ClientSession
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.api_timeout)
@@ -128,7 +128,7 @@ class SkyPlugin(Star):
             logger.info("光遇定时任务调度器已启动")
     
     async def terminate(self):
-        """插件终止时调用"""
+        """插件关闭时自动调用"""
         self._running = False
         
         # 取消定时任务
@@ -704,19 +704,46 @@ class SkyPlugin(Star):
         if not map_stats:
             return ""
         
-        result = ""
+        lines = []
+        # 定义地图顺序，让显示更有序
+        map_order = ["晨岛", "云野", "雨林", "霞谷", "暮土", "禁阁", "暴风眼", "破晓季"]
+        
+        # 先按固定顺序排列存在的地图
+        sorted_maps = []
+        for map_name in map_order:
+            if map_name in map_stats:
+                sorted_maps.append((map_name, map_stats[map_name]))
+        
+        # 添加其他未在顺序列表中的地图
         for map_name, map_data in map_stats.items():
+            if map_name not in map_order:
+                sorted_maps.append((map_name, map_data))
+        
+        for map_name, map_data in sorted_maps:
             if isinstance(map_data, dict):
                 total = map_data.get("total", 0)
                 collected = map_data.get("collected", 0)
                 uncollected = map_data.get("uncollected", 0)
-                result += f"   {map_name}: {collected}/{total}个"
-                if uncollected > 0:
-                    result += f" (缺{uncollected}个)"
-                result += "\n"
+                
+                # 计算未收集（如果没有uncollected字段，用total-collected）
+                if uncollected == 0 and total > 0:
+                    uncollected = total - collected
+                
+                # 使用emoji标记状态
+                if uncollected == 0:
+                    status = "✅"
+                    detail = "已拿满"
+                else:
+                    status = "❌"
+                    detail = f"缺{uncollected}个"
+                
+                line = f"   {status} {map_name}: {collected}/{total}个 ({detail})"
+                lines.append(line)
             else:
-                result += f"   {map_name}: {map_data}个\n"
-        return result
+                # 处理简单数值格式
+                lines.append(f"   • {map_name}: {map_data}个")
+        
+        return "\n".join(lines) + "\n" if lines else ""
     
     @filter.command("光翼查询")
     async def query_wings(self, event: AstrMessageEvent, sky_id: str = None):
@@ -769,10 +796,16 @@ class SkyPlugin(Star):
         result += f"   已收集: {collected}\n"
         result += f"   未收集: {uncollected}\n\n"
         
+        # 各地图详细统计
         map_stats = statistics.get("map_statistics", {})
         if map_stats:
-            result += "📍 各地图光翼:\n"
+            result += "📍 各地图光翼详情:\n"
             result += self._format_wing_map_stats(map_stats)
+        
+        # 计算总进度百分比
+        if total > 0:
+            percentage = (collected / total) * 100
+            result += f"\n📈 总进度: {percentage:.1f}% ({collected}/{total})"
         
         yield event.plain_result(result)
     
@@ -850,7 +883,7 @@ class SkyPlugin(Star):
     # ==================== 定时任务 ====================
     
     async def _scheduler_loop(self):
-        """定时任务调度器"""
+        """定时任务调度器（动态计算睡眠时间，避免时间漂移）"""
         while self._running:
             try:
                 now = self._get_beijing_time()
@@ -864,7 +897,7 @@ class SkyPlugin(Star):
                     task_key = f"daily_task_{current_date}_{current_time}"
                     if current_time == self.daily_task_push_time and self._last_executed.get(task_key) != current_time:
                         self._last_executed[task_key] = current_time
-                        await self._push_daily_tasks()
+                        asyncio.create_task(self._push_daily_tasks())
                 
                 # 老奶奶提醒（整点触发）
                 if self.enable_grandma_reminder:
@@ -872,7 +905,7 @@ class SkyPlugin(Star):
                     if current_minute == 0 and current_hour in [8, 10, 12, 16, 18, 20]:
                         if self._last_executed.get(grandma_key) != str(current_hour):
                             self._last_executed[grandma_key] = str(current_hour)
-                            await self._push_grandma_reminder()
+                            asyncio.create_task(self._push_grandma_reminder())
                 
                 # 献祭刷新提醒（周六00:00）
                 if self.enable_sacrifice_reminder:
@@ -880,7 +913,7 @@ class SkyPlugin(Star):
                     if now.weekday() == 5 and current_time == "00:00":
                         if self._last_executed.get(sacrifice_key) != current_date:
                             self._last_executed[sacrifice_key] = current_date
-                            await self._push_sacrifice_reminder()
+                            asyncio.create_task(self._push_sacrifice_reminder())
                 
                 # 碎石提醒（每天08:00）
                 if self.enable_debris_reminder:
@@ -888,29 +921,35 @@ class SkyPlugin(Star):
                     if current_time == "08:00":
                         if self._last_executed.get(debris_key) != current_date:
                             self._last_executed[debris_key] = current_date
-                            await self._push_debris_info()
+                            asyncio.create_task(self._push_debris_info())
                 
-                await asyncio.sleep(60)
+                # 动态计算睡眠时间，确保每分钟整点检查（避免时间漂移）
+                sleep_seconds = 60 - self._get_beijing_time().second
+                await asyncio.sleep(sleep_seconds)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"定时任务出错: {e}")
-                await asyncio.sleep(60)
+                await asyncio.sleep(60 - self._get_beijing_time().second)
     
     async def _push_daily_tasks(self):
-        """推送每日任务"""
+        """推送每日任务（并发发送，避免阻塞）"""
         if not self.push_groups:
             return
         
-        for group_id in self.push_groups:
+        async def send_to_group(group_id: str):
             try:
                 await self.context.send_message(group_id, "🌟 光遇今日每日任务")
                 await self.context.send_message(group_id, self._get_daily_task_image_url())
             except Exception as e:
                 logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
+        
+        # 并发发送给所有群组
+        tasks = [send_to_group(gid) for gid in self.push_groups]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _push_grandma_reminder(self):
-        """推送老奶奶用餐提醒"""
+        """推送老奶奶用餐提醒（并发发送，避免阻塞）"""
         if not self.push_groups:
             return
         
@@ -919,14 +958,18 @@ class SkyPlugin(Star):
         message += "⏰ 用餐时间约30分钟\n"
         message += "💡 带上火盆或火把可以自动收集烛火哦~"
         
-        for group_id in self.push_groups:
+        async def send_to_group(group_id: str):
             try:
                 await self.context.send_message(group_id, message)
             except Exception as e:
                 logger.error(f"推送老奶奶提醒到群组 {group_id} 失败: {e}")
+        
+        # 并发发送给所有群组
+        tasks = [send_to_group(gid) for gid in self.push_groups]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _push_sacrifice_reminder(self):
-        """推送献祭刷新提醒"""
+        """推送献祭刷新提醒（并发发送，避免阻塞）"""
         if not self.push_groups:
             return
         
@@ -934,14 +977,18 @@ class SkyPlugin(Star):
         message += "📅 每周六凌晨00:00刷新\n"
         message += "💡 记得去暴风眼献祭获取升华蜡烛~"
         
-        for group_id in self.push_groups:
+        async def send_to_group(group_id: str):
             try:
                 await self.context.send_message(group_id, message)
             except Exception as e:
                 logger.error(f"推送献祭提醒到群组 {group_id} 失败: {e}")
+        
+        # 并发发送给所有群组
+        tasks = [send_to_group(gid) for gid in self.push_groups]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _push_debris_info(self):
-        """推送碎石信息"""
+        """推送碎石信息（并发发送，避免阻塞）"""
         if not self.push_groups:
             return
         
@@ -953,11 +1000,15 @@ class SkyPlugin(Star):
         message += f"📍 地图: {data['map_name']}\n"
         message += "💡 完成碎石任务可以获得升华蜡烛奖励~"
         
-        for group_id in self.push_groups:
+        async def send_to_group(group_id: str):
             try:
                 await self.context.send_message(group_id, message)
             except Exception as e:
                 logger.error(f"推送碎石信息到群组 {group_id} 失败: {e}")
+        
+        # 并发发送给所有群组
+        tasks = [send_to_group(gid) for gid in self.push_groups]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     # ==================== 菜单命令 ====================
     
