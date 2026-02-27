@@ -7,10 +7,10 @@
 
 _✨ 你的光遇游戏小助手 ✨_
 
-[![Plugin Version](https://img.shields.io/badge/Latest_Version-v1.0.0-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/AstrBot-Devs/astrbot_plugin_sky)
+[![Plugin Version](https://img.shields.io/badge/Latest_Version-v1.0.0-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/wzq10314/astrbot_plugin_sky)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-ff69b4?style=for-the-badge)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
-[![](https://img.shields.io/badge/在GitHub中查看仓库-white?style=for-the-badge&color=24292e&logo=github)](https://github.com/AstrBot-Devs/astrbot_plugin_sky)
+[![](https://img.shields.io/badge/在GitHub中查看仓库-white?style=for-the-badge&color=24292e&logo=github)](https://github.com/wzq10314/astrbot_plugin_sky)
 
 <img src="https://count.getloli.com/@astrbot_plugin_sky?name=astrbot_plugin_sky&theme=booru-jaypee&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="count" />
 
@@ -33,7 +33,7 @@ _✨ 你的光遇游戏小助手 ✨_
 ```bash
 # 克隆仓库到插件目录
 cd /AstrBot/data/plugins
-git clone https://github.com/AstrBot-Devs/astrbot_plugin_sky
+git clone https://github.com/wzq10314/astrbot_plugin_sky
 
 # 控制台重启AstrBot
 ```
