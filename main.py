@@ -1,1166 +1,898 @@
 """
-AstrBot 光遇(Sky)插件
-通过LLM自然语言交互查询光遇游戏信息、光遇ID绑定、定时推送提醒
-API来源: https://gitee.com/Tloml-Starry/Tlon-Sky
+QQ群日常分析插件
+基于群聊记录生成精美的日常分析报告，包含话题总结、用户画像、统计数据等
+
+重构版本 - 使用模块化架构，支持跨平台
 """
+
 import asyncio
-import json
-import random
-import time
-import re
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Dict, List, Optional, Set
-from urllib.parse import quote
+import os
 
-import aiohttp
-from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import PermissionType
+from astrbot.api.star import Context, Star
+from astrbot.core.message.components import File
+
+from .src.application.commands.template_command_service import (
+    TemplateCommandService,
+)
+from .src.application.services.analysis_application_service import (
+    AnalysisApplicationService,
+)
+from .src.application.services.message_processing_service import (
+    MessageProcessingService,
+)
+from .src.domain.services.analysis_domain_service import AnalysisDomainService
+from .src.domain.services.incremental_merge_service import IncrementalMergeService
+from .src.domain.services.statistics_service import StatisticsService
+from .src.infrastructure.analysis.llm_analyzer import LLMAnalyzer
+from .src.infrastructure.config.config_manager import ConfigManager
+from .src.infrastructure.persistence.history_manager import HistoryManager
+from .src.infrastructure.persistence.incremental_store import IncrementalStore
+from .src.infrastructure.persistence.telegram_group_registry import (
+    TelegramGroupRegistry,
+)
+from .src.infrastructure.platform.bot_manager import BotManager
+from .src.infrastructure.platform.template_preview import (
+    TelegramTemplatePreviewHandler,
+    TemplatePreviewRouter,
+)
+from .src.infrastructure.reporting.generators import ReportGenerator
+from .src.infrastructure.scheduler.auto_scheduler import AutoScheduler
+from .src.infrastructure.scheduler.retry import RetryManager
+from .src.utils.pdf_utils import PDFInstaller
 
 
-# 常量定义
-SACRIFICE_INFO_TEXT = """🔥 献祭信息
+class GroupDailyAnalysis(Star):
+    """群分析插件主类"""
 
-📅 刷新时间: 每周六 00:00
-📍 位置: 暴风眼（伊甸之眼）
+    # ── 显式类型声明（消除 Pylance Optional 推断） ──
+    config: AstrBotConfig
+    config_manager: ConfigManager
+    bot_manager: BotManager
+    history_manager: HistoryManager
+    report_generator: ReportGenerator
+    telegram_group_registry: TelegramGroupRegistry
+    statistics_service: StatisticsService
+    analysis_domain_service: AnalysisDomainService
+    llm_analyzer: LLMAnalyzer
+    incremental_store: IncrementalStore
+    incremental_merge_service: IncrementalMergeService
+    analysis_service: AnalysisApplicationService
+    message_processing_service: MessageProcessingService
+    template_command_service: TemplateCommandService
+    telegram_template_preview_handler: TelegramTemplatePreviewHandler
+    template_preview_router: TemplatePreviewRouter
+    retry_manager: RetryManager
+    auto_scheduler: AutoScheduler
 
-📖 献祭是光遇中获取升华蜡烛的主要途径
-
-🎁 献祭奖励:
-   • 升华蜡烛（用于解锁先祖节点）
-   • 每周最多约15根升华蜡烛
-
-💡 小贴士:
-   • 进入暴风眼需要20+光翼
-   • 献祭时尽量点亮更多石像
-   • 可以组队献祭互相照亮
-   • 注意躲避冥龙，被照到会损失光翼"""
-
-GRANDMA_SCHEDULE_TEXT = """🍲 老奶奶用餐信息
-
-📍 位置: 雨林隐藏图（秘密花园）
-📖 雨林老奶奶会在用餐时间提供烛火
-
-⏰ 用餐时间:
-   • 08:00 - 08:30
-   • 10:00 - 10:30
-   • 12:00 - 12:30
-   • 16:00 - 16:30
-   • 18:00 - 18:30
-   • 20:00 - 20:30
-
-💡 小贴士:
-   • 带上火盆或火把可以自动收集烛火
-   • 可以挂机收集
-   • 每次约可获得1000+烛火（约10根蜡烛）"""
-
-
-class SkyPlugin(Star):
-    """光遇游戏助手插件"""
-    
-    # API 基础地址
-    SKY_API_BASE = "https://api.t1qq.com/api/sky"
-    RESOURCES_BASE = "https://ghfast.top/https://raw.githubusercontent.com/A-Kevin1217/resources/master/resources"
-    WING_API = "https://s.166.net/config/ds_yy_02/ma75_wing_wings.json"
-    WING_QUERY_API = "https://ovoav.com/api/sky/gycx/gka"
-    SERVER_STATUS_API = "https://live-queue-sky-merge.game.163.com/queue?type=json"
-    
-    # 北京时间时区
-    BEIJING_TZ = timezone(timedelta(hours=8))
-    
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        
-        # 从配置读取 API Key
-        self.sky_api_key = config.get("sky_api_key", "")
-        self.wing_query_key = config.get("wing_query_key", "")
-        
-        # 推送配置
-        self.enable_daily_task_push = config.get("enable_daily_task_push", True)
-        self.daily_task_push_time = config.get("daily_task_push_time", "08:00")
-        self.push_groups = config.get("push_groups", [])
-        self.enable_grandma_reminder = config.get("enable_grandma_reminder", True)
-        self.enable_sacrifice_reminder = config.get("enable_sacrifice_reminder", True)
-        self.enable_debris_reminder = config.get("enable_debris_reminder", True)
-        
-        # API配置
-        self.api_timeout = config.get("api_timeout", 10)
-        self.cache_duration = config.get("cache_duration", 30)
-        
-        # 数据缓存
-        self._cache: Dict[str, Dict] = {}
-        self._cache_time: Dict[str, float] = {}
-        
-        # 使用 StarTools 获取数据目录
-        plugin_data_dir = StarTools.get_data_dir()
-        self.sky_bindings_dir = plugin_data_dir / "sky_bindings"
-        self.sky_bindings_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 文件写入锁，防止并发写入导致数据损坏
-        self._file_lock = asyncio.Lock()
-        
-        # 共享的 ClientSession
-        self._session: Optional[aiohttp.ClientSession] = None
-        
-        # 定时任务
-        self._scheduler_task: Optional[asyncio.Task] = None
-        self._running = False
-        
-        # [修复] 使用集合跟踪活跃的推送子任务，便于统一取消
-        self._active_push_tasks: Set[asyncio.Task] = set()
-        
-        # [修复] 记录每个任务的执行状态，使用更高效的存储结构
-        # 格式: {task_type: last_executed_date_str}
-        self._last_executed: Dict[str, str] = {}
-        
-        logger.info("光遇插件已加载")
-    
-    async def initialize(self):
-        """插件加载时自动调用"""
-        # 创建共享的 ClientSession
-        self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.api_timeout)
+
+        # 1. 基础设施层
+        self.config_manager = ConfigManager(config)
+        self.bot_manager = BotManager(self.config_manager)
+        self.bot_manager.set_context(context)
+        self.bot_manager.set_plugin_instance(self)
+        self.history_manager = HistoryManager(self)
+        self.report_generator = ReportGenerator(self.config_manager)
+
+        # Telegram 注册表 (持久层)
+        self.telegram_group_registry = TelegramGroupRegistry(self)
+
+        # 2. 领域层
+        self.statistics_service = StatisticsService()
+        self.analysis_domain_service = AnalysisDomainService()
+
+        # 3. 分析核心 (LLM Bridge)
+        self.llm_analyzer = LLMAnalyzer(context, self.config_manager)
+
+        # 4. 增量分析组件
+        self.incremental_store = IncrementalStore(self)
+        self.incremental_merge_service = IncrementalMergeService()
+
+        # 5. 应用层
+        self.analysis_service = AnalysisApplicationService(
+            self.config_manager,
+            self.bot_manager,
+            self.history_manager,
+            self.report_generator,
+            self.llm_analyzer,
+            self.statistics_service,
+            self.analysis_domain_service,
+            incremental_store=self.incremental_store,
+            incremental_merge_service=self.incremental_merge_service,
         )
-        self._running = True
-        
-        # 启动定时任务调度器（只要有任意一个提醒功能开启就启动）
-        if (self.enable_daily_task_push or self.enable_grandma_reminder or 
-            self.enable_sacrifice_reminder or self.enable_debris_reminder):
-            self._scheduler_task = asyncio.create_task(self._scheduler_loop())
-            logger.info("光遇定时任务调度器已启动")
-    
-    async def terminate(self):
-        """插件关闭时自动调用"""
-        self._running = False
-        
-        # 取消调度器主任务
-        if self._scheduler_task:
-            self._scheduler_task.cancel()
-            try:
-                await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
-        
-        # [修复] 取消所有活跃的推送子任务
-        if self._active_push_tasks:
-            logger.info(f"正在取消 {len(self._active_push_tasks)} 个未完成的推送任务...")
-            for task in list(self._active_push_tasks):
-                if not task.done():
-                    task.cancel()
-            
-            # 等待所有任务完成或取消
-            if self._active_push_tasks:
-                await asyncio.gather(*self._active_push_tasks, return_exceptions=True)
-            self._active_push_tasks.clear()
-        
-        # 关闭 ClientSession
-        if self._session:
-            await self._session.close()
-            self._session = None
-        
-        logger.info("光遇插件已终止")
-    
-    # [修复] 辅助方法：创建受跟踪的推送任务
-    def _create_tracked_task(self, coro) -> asyncio.Task:
-        """创建被跟踪的异步任务，确保可以统一取消"""
-        task = asyncio.create_task(coro)
-        self._active_push_tasks.add(task)
-        
-        # 任务完成时自动从集合中移除
-        def cleanup(t):
-            self._active_push_tasks.discard(t)
-        
-        task.add_done_callback(cleanup)
-        return task
-    
-    # [修复] 辅助方法：清理过期的 _last_executed 记录
-    def _cleanup_last_executed(self, current_date: str):
-        """清理非当天的执行记录，防止内存无限增长"""
-        # 只保留当天的记录
-        keys_to_remove = [
-            key for key in self._last_executed.keys() 
-            if not key.endswith(f"_{current_date}")
-        ]
-        for key in keys_to_remove:
-            del self._last_executed[key]
-    
-    # ==================== 数据文件操作 ====================
-    
-    def _get_sky_binding_file(self, user_id: str) -> Path:
-        """获取用户光遇ID绑定文件路径"""
-        return self.sky_bindings_dir / f"{user_id}.json"
-    
-    async def _load_json(self, file_path: Path, default: Optional[dict] = None) -> dict:
-        """加载JSON文件（异步安全）
-        
-        [修复] 区分"文件不存在"和"读取错误"：
-        - 文件不存在：返回默认值（初始化新用户）
-        - 读取错误：抛出异常，避免误覆盖数据
-        """
-        if default is None:
-            default = {}
-        
-        # 文件不存在，返回默认值（新用户初始化）
-        if not file_path.exists():
-            return default.copy()
-        
+
+        # 消息处理服务
+        self.message_processing_service = MessageProcessingService(
+            context, self.telegram_group_registry
+        )
+        self.template_command_service = TemplateCommandService(
+            plugin_root=os.path.dirname(__file__)
+        )
+        self.telegram_template_preview_handler = TelegramTemplatePreviewHandler(
+            config_manager=self.config_manager,
+            template_service=self.template_command_service,
+        )
+        self.template_preview_router = TemplatePreviewRouter(
+            handlers=[self.telegram_template_preview_handler]
+        )
+
+        # 调度与重试
+        self.retry_manager = RetryManager(
+            self.bot_manager, self.html_render, self.report_generator
+        )
+        self.auto_scheduler = AutoScheduler(
+            self.config_manager,
+            self.analysis_service,
+            self.bot_manager,
+            self.retry_manager,
+            self.report_generator,
+            self.html_render,
+            plugin_instance=self,
+        )
+
+        self._initialized = False
+        # 异步注册任务，处理插件重载情况
+        asyncio.create_task(self._run_initialization("Plugin Reload/Init"))
+
+    # orchestrators 缓存已移至 应用层逻辑 (分析服务) 或 暂时移除以简化。
+    # 如果需要高性能缓存，后续可由 AnalysisApplicationService 内部维护。
+
+    @filter.on_platform_loaded()
+    async def on_platform_loaded(self):
+        """平台加载完成后初始化"""
+        await self._run_initialization("Platform Loaded")
+
+    async def _run_initialization(self, source: str):
+        """统一初始化逻辑"""
+        if self._initialized:
+            return
+
+        # 稍微延迟，确保 context 和环境稳定
+        await asyncio.sleep(2)
+        if self._initialized:  # Double check after sleep
+            return
+
         try:
-            async with self._file_lock:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    if not content.strip():
-                        logger.warning(f"JSON文件为空 {file_path}，使用默认值")
-                        return default.copy()
-                    return json.loads(content)
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败 {file_path}: {e}，为避免数据覆盖，抛出异常")
-            raise RuntimeError(f"用户数据文件损坏，请检查: {file_path}") from e
-        except Exception as e:
-            logger.error(f"读取文件失败 {file_path}: {e}，为避免数据覆盖，抛出异常")
-            raise RuntimeError(f"无法读取用户数据: {file_path}") from e
-    
-    async def _save_json(self, file_path: Path, data: dict):
-        """保存JSON文件（异步安全，带锁保护）"""
-        try:
-            async with self._file_lock:
-                # 使用临时文件写入，防止写入过程中断导致数据损坏
-                temp_path = file_path.with_suffix('.tmp')
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                # 原子性替换
-                temp_path.replace(file_path)
-        except Exception as e:
-            logger.error(f"保存JSON文件失败 {file_path}: {e}")
-            raise
-    
-    async def _get_user_sky_data(self, user_id: str) -> dict:
-        """获取用户光遇ID绑定数据"""
-        file_path = self._get_sky_binding_file(user_id)
-        try:
-            data = await self._load_json(file_path)
-            if not data:
-                data = {
-                    "user_id": user_id,
-                    "ids": [],
-                    "current_id": None
-                }
-                await self._save_json(file_path, data)
-            return data
-        except RuntimeError:
-            # 数据文件损坏，返回空数据但不自动覆盖，让用户知道
-            logger.error(f"用户 {user_id} 的数据文件损坏，请手动检查")
-            return {
-                "user_id": user_id,
-                "ids": [],
-                "current_id": None,
-                "_error": "数据文件损坏，请检查服务器文件"
-            }
-    
-    async def _save_user_sky_data(self, user_id: str, data: dict):
-        """保存用户光遇ID绑定数据"""
-        file_path = self._get_sky_binding_file(user_id)
-        await self._save_json(file_path, data)
-    
-    # ==================== 缓存操作 ====================
-    
-    def _get_cache(self, key: str) -> Optional[Dict]:
-        """获取缓存数据"""
-        if key in self._cache:
-            cache_time = self._cache_time.get(key, 0)
-            if time.time() - cache_time < self.cache_duration * 60:
-                return self._cache[key]
-        return None
-    
-    def _set_cache(self, key: str, data: Dict):
-        """设置缓存数据"""
-        self._cache[key] = data
-        self._cache_time[key] = time.time()
-    
-    # ==================== API请求 ====================
-    
-    def _mask_url(self, url: str) -> str:
-        """隐藏 URL 中的敏感信息（API Key）"""
-        masked = re.sub(r'([&?]key=)[^&]+', r'\1***', url)
-        return masked
-    
-    async def _fetch_json(self, url: str, use_cache: bool = True, cache_key: Optional[str] = None) -> Optional[Dict]:
-        """从URL获取JSON数据"""
-        # 检查缓存
-        if use_cache and cache_key:
-            cached = self._get_cache(cache_key)
-            if cached is not None:
-                return cached
-        
-        try:
-            if self._session is None:
-                return None
-            async with self._session.get(url) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    try:
-                        data = json.loads(text)
-                        # 设置缓存
-                        if use_cache and cache_key:
-                            self._set_cache(cache_key, data)
-                        return data
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON解析失败 ({self._mask_url(url)}): {e}, 响应片段: {text[:200]}")
-                        return None
-                else:
-                    logger.error(f"请求失败 ({self._mask_url(url)}): HTTP {resp.status}")
-                    return None
-        except Exception as e:
-            logger.error(f"获取数据失败 ({self._mask_url(url)}): {e}")
-        return None
-    
-    # ==================== 时间工具 ====================
-    
-    def _get_beijing_time(self) -> datetime:
-        """获取北京时间"""
-        return datetime.now(self.BEIJING_TZ)
-    
-    # ==================== 核心逻辑方法 ====================
-    
-    async def _get_debris_info_data(self) -> Dict:
-        """获取碎石信息数据"""
-        now = self._get_beijing_time()
-        day = now.day
-        day_of_week = now.weekday()
-        
-        is_first_half = day <= 15
-        valid_days = [2, 6, 0] if is_first_half else [3, 5, 0]
-        
-        if day_of_week not in valid_days:
-            return {"has_debris": False}
-        
-        maps = ["暮土", "禁阁", "云野", "雨林", "霞谷"]
-        map_name = maps[(day - 1) % len(maps)]
-        
-        if day_of_week == 0:
-            debris_type = "红石" if is_first_half else "黑石"
-        elif day_of_week in [2, 3]:
-            debris_type = "黑石"
-        else:
-            debris_type = "红石"
-        
-        locations = {
-            "云野": {2: "蝴蝶平原", 3: "仙乡", 5: "云顶浮石", 6: "幽光山洞", 0: "圣岛"},
-            "雨林": {2: "荧光森林", 3: "密林遗迹", 5: "大树屋", 6: "雨林神殿", 0: "秘密花园"},
-            "霞谷": {2: "滑冰场", 3: "滑冰场", 5: "圆梦村", 6: "圆梦村", 0: "雪隐峰"},
-            "暮土": {2: "边陲荒漠", 3: "远古战场", 5: "黑水港湾", 6: "巨兽荒原", 0: "失落方舟"},
-            "禁阁": {2: "星光沙漠", 3: "星光沙漠", 5: "星光沙漠·一隅", 6: "星光沙漠·一隅", 0: "星光沙漠·一隅"}
-        }
-        
-        location = locations.get(map_name, {}).get(day_of_week, "未知位置")
-        
-        return {
-            "has_debris": True,
-            "map_name": map_name,
-            "location": location,
-            "debris_type": debris_type
-        }
-    
-    def _format_debris_result(self, data: Dict) -> str:
-        """格式化碎石信息结果"""
-        if not data.get("has_debris"):
-            return "💎 今日碎石信息\n\n今日无碎石"
-        
-        result = f"💎 今日碎石信息\n\n"
-        result += f"📍 地图: {data['map_name']}\n"
-        result += f"📍 位置: {data['location']}\n"
-        result += f"🔷 类型: {data['debris_type']}\n\n"
-        result += f"⏰ 坠落时间:\n"
-        result += f"   • 07:08 (持续约50分钟)\n"
-        result += f"   • 13:08 (持续约50分钟)\n"
-        result += f"   • 19:08 (持续约50分钟)\n\n"
-        result += f"🎁 奖励: 升华蜡烛\n"
-        result += f"💡 完成碎石任务可以获得升华蜡烛奖励"
-        return result
-    
-    async def _get_season_progress_data(self) -> Optional[Dict]:
-        """获取季节进度数据"""
-        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/GameProgress.json"
-        return await self._fetch_json(url, use_cache=True, cache_key="season_progress")
-    
-    def _format_season_result(self, data: Optional[Dict]) -> str:
-        """格式化季节进度结果"""
-        if not data:
-            return "❌ 获取季节信息失败，请稍后重试"
-        
-        season = data.get("season", {})
-        season_name = season.get("name", "未知季节")
-        start_date = season.get("startDate", "")
-        end_date = season.get("endDate", "")
-        required_true = season.get("requiredCandlesTrue", 0)
-        required_false = season.get("requiredCandlesFalse", 0)
-        
-        now = self._get_beijing_time()
-        
-        if end_date:
-            date_part = end_date.split()[0]
-            try:
-                end = datetime.strptime(date_part.replace("-", "/"), "%Y/%m/%d")
-                end = end.replace(tzinfo=self.BEIJING_TZ)
-                diff = end - now
-                
-                # 检查是否已结束
-                if diff.total_seconds() <= 0:
-                    remaining = "已结束"
-                    days = 0
-                else:
-                    days = diff.days
-                    hours = diff.seconds // 3600
-                    minutes = (diff.seconds % 3600) // 60
-                    remaining = f"{days}天{hours}时{minutes}分" if days > 0 else f"{hours}时{minutes}分"
-            except ValueError:
-                remaining = "未知"
-                days = 0
-        else:
-            remaining = "未知"
-            days = 0
-        
-        result = f"🌸 当前季节: {season_name}\n"
-        if start_date:
-            result += f"📅 开始时间: {start_date}\n"
-        if end_date:
-            result += f"📅 结束时间: {end_date}\n"
-        result += f"⏰ 剩余时间: {remaining}\n"
-        
-        if days > 0:
-            days_with = (required_true + 5) // 6
-            days_without = (required_false + 4) // 5
-            result += f"\n📊 毕业所需天数:\n"
-            result += f"   有季卡: 约{days_with}天 ({required_true}根季节蜡烛)\n"
-            result += f"   无季卡: 约{days_without}天 ({required_false}根季节蜡烛)"
-        
-        return result
-    
-    async def _get_traveling_spirit_data(self) -> Optional[Dict]:
-        """获取复刻先祖数据
-        [修复] 对 monthRecord 按日期排序，不依赖源数据顺序
-        """
-        url = f"{self.RESOURCES_BASE}/json/SkyChildrenoftheLight/RegressionRecords.json"
-        records = await self._fetch_json(url, use_cache=True, cache_key="traveling_spirit")
-        
-        if not records:
-            return None
-        
-        now = self._get_beijing_time()
-        current_year = now.year
-        
-        year_data = None
-        for record in records:
-            if record.get("year") == current_year:
-                year_data = record
-                break
-        
-        if not year_data:
-            return None
-        
-        year_record = year_data.get("yearRecord", [])
-        if not year_record:
-            return None
-        
-        # 按月份排序，获取最新月份
-        sorted_months = sorted(year_record, key=lambda x: x.get("month", 0), reverse=True)
-        if not sorted_months:
-            return None
-        
-        latest_month = sorted_months[0]
-        month_record = latest_month.get("monthRecord", [])
-        
-        if not month_record:
-            return None
-        
-        # [修复] 按日期排序，确保取到最新的先祖，不依赖源数据顺序
-        sorted_records = sorted(month_record, key=lambda x: x.get("day", 0))
-        latest = sorted_records[-1]
-        
-        return {
-            "spirit_name": latest.get("name", "未知先祖"),
-            "spirit_day": latest.get("day", 0),
-            "month": latest_month.get("month", 0),
-            "year": current_year
-        }
-    
-    def _format_traveling_spirit_result(self, data: Optional[Dict]) -> str:
-        """格式化复刻先祖结果"""
-        if not data:
-            return "暂无复刻数据"
-        
-        result = f"🎭 当前复刻先祖: {data['spirit_name']}\n\n"
-        result += f"📅 到达时间: {data['year']}年{data['month']}月{data['spirit_day']}日\n"
-        result += f"⏰ 停留时间: 约4天\n\n"
-        result += f"💡 发送「复刻兑换图」查看兑换物品详情"
-        return result
-    
-    async def _get_server_status_data(self) -> Optional[Dict]:
-        """获取服务器状态数据"""
-        return await self._fetch_json(self.SERVER_STATUS_API, use_cache=False)
-    
-    def _format_server_status_result(self, data: Optional[Dict]) -> str:
-        """格式化服务器状态结果"""
-        if data is None:
-            return "❌ 获取服务器状态失败，可能正在维护更新"
-        
-        ret = data.get("ret", 0)
-        pos = data.get("pos", 0)
-        wait_time = data.get("wait_time", 0)
-        
-        if ret != 1:
-            return "✅ 当前光遇服务器畅通，无需排队"
-        
-        hours = wait_time // 3600
-        minutes = (wait_time % 3600) // 60
-        seconds = wait_time % 60
-        
-        if hours > 0:
-            time_display = f"{hours}时{minutes}分{seconds}秒"
-        elif minutes > 0:
-            time_display = f"{minutes}分{seconds}秒"
-        else:
-            time_display = f"{seconds}秒"
-        
-        result = f"⏳ 当前光遇服务器排队中\n\n"
-        result += f"👥 排队人数: {pos}位\n"
-        result += f"⏰ 预计等待时间: {time_display}"
-        return result
-    
-    async def _get_wing_count_data(self) -> Optional[List]:
-        """获取光翼统计数据"""
-        return await self._fetch_json(self.WING_API, use_cache=True, cache_key="wing_count")
-    
-    def _format_wing_count_result(self, data: Optional[List]) -> str:
-        """格式化光翼统计结果"""
-        if not data:
-            return "❌ 获取光翼数据失败，请稍后重试"
-        
-        category_map = {
-            "晨岛": "晨",
-            "云野": "云",
-            "雨林": "雨",
-            "霞谷": "霞",
-            "暮土": "暮",
-            "禁阁": "禁",
-            "暴风眼": "暴",
-            "复刻永久": "复刻永久",
-            "普通永久": "普通永久"
-        }
-        
-        counts = {v: 0 for v in category_map.values()}
-        
-        for item in data:
-            key = category_map.get(item.get("一级标签", ""))
-            if key:
-                counts[key] += 1
-        
-        reissue = counts.get("复刻永久", 0)
-        normal = counts.get("普通永久", 0)
-        
-        result = f"🪽 光遇全图光翼统计\n\n"
-        result += f"📊 总光翼数量: {len(data)}\n"
-        result += f"   永久翼: {reissue + normal}个\n"
-        result += f"   (复刻先祖: {reissue}个, 常驻先祖: {normal}个)\n\n"
-        
-        result += "📍 各图光翼数量:\n"
-        for map_name, key in category_map.items():
-            if key not in ["复刻永久", "普通永久"]:
-                result += f"   {map_name}: {counts[key]}个\n"
-        
-        result += "\n💡 数据来源: 网易大神"
-        return result
-    
-    # ==================== 图片URL生成（统一处理）====================
-    
-    def _get_daily_task_image_url(self) -> str:
-        """获取每日任务图片URL"""
-        rand = random.randint(0, 1000000)
-        return f"{self.SKY_API_BASE}/sc/scrw?key={self.sky_api_key}&num={rand}"
-    
-    def _get_season_candle_image_url(self) -> str:
-        """获取季节蜡烛图片URL"""
-        rand = random.randint(0, 1000000)
-        return f"{self.SKY_API_BASE}/sc/scjl?key={self.sky_api_key}&num={rand}"
-    
-    def _get_big_candle_image_url(self) -> str:
-        """获取大蜡烛图片URL"""
-        rand = random.randint(0, 1000000)
-        return f"{self.SKY_API_BASE}/sc/scdl?key={self.sky_api_key}&num={rand}"
-    
-    def _get_magic_image_url(self) -> str:
-        """获取免费魔法图片URL"""
-        rand = random.randint(0, 1000000)
-        return f"{self.SKY_API_BASE}/mf/magic?key={self.sky_api_key}&num={rand}"
-    
-    # ==================== LLM工具函数 ====================
-    
-    @filter.llm_tool(name="get_sky_daily_tasks")
-    async def tool_get_daily_tasks(self, event: AstrMessageEvent):
-        """获取光遇今日每日任务图片
-        
-        当用户询问"今天有什么任务"、"每日任务是什么"、"光遇任务"时使用此工具。
-        """
-        yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(self._get_daily_task_image_url())
-    
-    @filter.llm_tool(name="get_sky_season_candles")
-    async def tool_get_season_candles(self, event: AstrMessageEvent):
-        """获取光遇季节蜡烛位置图片
-        
-        当用户询问"季节蜡烛在哪里"、"季蜡位置"、"季节蜡烛"时使用此工具。
-        """
-        yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(self._get_season_candle_image_url())
-    
-    @filter.llm_tool(name="get_sky_big_candles")
-    async def tool_get_big_candles(self, event: AstrMessageEvent):
-        """获取光遇大蜡烛位置图片
-        
-        当用户询问"大蜡烛在哪里"、"大蜡位置"、"大蜡烛"时使用此工具。
-        """
-        yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(self._get_big_candle_image_url())
-    
-    @filter.llm_tool(name="get_sky_free_magic")
-    async def tool_get_free_magic(self, event: AstrMessageEvent):
-        """获取光遇免费魔法图片
-        
-        当用户询问"今天有什么魔法"、"免费魔法"、"魔法"时使用此工具。
-        """
-        yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(self._get_magic_image_url())
-    
-    @filter.llm_tool(name="get_sky_season_progress")
-    async def tool_get_season_progress(self, event: AstrMessageEvent):
-        """获取当前季节进度信息
-        
-        当用户询问"现在是什么季节"、"季节还有多久结束"、"季节进度"时使用此工具。
-        """
-        data = await self._get_season_progress_data()
-        result = self._format_season_result(data)
-        yield event.plain_result(result)
-    
-    @filter.llm_tool(name="get_sky_debris_info")
-    async def tool_get_debris_info(self, event: AstrMessageEvent):
-        """获取今日碎石信息
-        
-        当用户询问"今天碎石在哪里"、"碎石是什么类型"、"碎石"时使用此工具。
-        """
-        data = await self._get_debris_info_data()
-        result = self._format_debris_result(data)
-        yield event.plain_result(result)
-    
-    @filter.llm_tool(name="get_sky_traveling_spirit")
-    async def tool_get_traveling_spirit(self, event: AstrMessageEvent):
-        """获取复刻先祖信息
-        
-        当用户询问"复刻先祖是谁"、"复刻有什么物品"、"复刻"时使用此工具。
-        """
-        data = await self._get_traveling_spirit_data()
-        result = self._format_traveling_spirit_result(data)
-        yield event.plain_result(result)
-    
-    @filter.llm_tool(name="get_sky_sacrifice_info")
-    async def tool_get_sacrifice_info(self, event: AstrMessageEvent):
-        """获取献祭相关信息
-        
-        当用户询问"献祭什么时候刷新"、"献祭有什么奖励"、"献祭"时使用此工具。
-        """
-        yield event.plain_result(SACRIFICE_INFO_TEXT)
-    
-    @filter.llm_tool(name="get_sky_grandma_schedule")
-    async def tool_get_grandma_schedule(self, event: AstrMessageEvent):
-        """获取老奶奶用餐时间表
-        
-        当用户询问"老奶奶什么时候开饭"、"老奶奶在哪里"、"老奶奶"时使用此工具。
-        """
-        yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
-    
-    @filter.llm_tool(name="get_sky_wing_count")
-    async def tool_get_wing_count(self, event: AstrMessageEvent):
-        """获取光遇全图光翼统计
-        
-        当用户询问"光翼有多少个"、"全图光翼"、"光翼统计"时使用此工具。
-        """
-        data = await self._get_wing_count_data()
-        result = self._format_wing_count_result(data)
-        yield event.plain_result(result)
-    
-    @filter.llm_tool(name="get_sky_server_status")
-    async def tool_get_server_status(self, event: AstrMessageEvent):
-        """获取光遇服务器状态
-        
-        当用户询问"光遇服务器状态"、"光遇排队"、"服务器"时使用此工具。
-        """
-        data = await self._get_server_status_data()
-        result = self._format_server_status_result(data)
-        yield event.plain_result(result)
-    
-    # ==================== 光遇ID绑定功能 ====================
-    
-    @filter.command("光遇绑定")
-    async def bind_sky_id(self, event: AstrMessageEvent, sky_id: str):
-        """绑定光遇ID"""
-        user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
-        
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if sky_id in user_data["ids"]:
-            yield event.plain_result(f"⚠️ ID {sky_id} 已经绑定过了！")
-            return
-        
-        user_data["ids"].append(sky_id)
-        if not user_data["current_id"]:
-            user_data["current_id"] = sky_id
-        
-        await self._save_user_sky_data(user_id, user_data)
-        yield event.plain_result(f"✅ 绑定成功！当前ID: {sky_id}\n\n💡 使用「光翼查询」查询该ID的光翼信息")
-    
-    @filter.command("光遇切换")
-    async def switch_sky_id(self, event: AstrMessageEvent, index: int):
-        """切换当前光遇ID"""
-        user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
-        
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if not user_data["ids"]:
-            yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定")
-            return
-        
-        if index < 1 or index > len(user_data["ids"]):
-            yield event.plain_result(f"序号无效！请输入1-{len(user_data['ids'])}之间的数字。")
-            return
-        
-        user_data["current_id"] = user_data["ids"][index - 1]
-        await self._save_user_sky_data(user_id, user_data)
-        yield event.plain_result(f"✅ 已切换到ID: {user_data['current_id']}")
-    
-    @filter.command("光遇删除")
-    async def delete_sky_id(self, event: AstrMessageEvent, index: int):
-        """删除绑定的光遇ID"""
-        user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
-        
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if not user_data["ids"]:
-            yield event.plain_result("⚠️ 您还没有绑定任何ID！")
-            return
-        
-        if index < 1 or index > len(user_data["ids"]):
-            yield event.plain_result(f"序号无效！请输入1-{len(user_data['ids'])}之间的数字。")
-            return
-        
-        deleted_id = user_data["ids"].pop(index - 1)
-        if user_data["current_id"] == deleted_id:
-            user_data["current_id"] = user_data["ids"][0] if user_data["ids"] else None
-        
-        await self._save_user_sky_data(user_id, user_data)
-        yield event.plain_result(f"✅ 已删除ID: {deleted_id}")
-    
-    @filter.command("光遇ID列表")
-    async def list_sky_ids(self, event: AstrMessageEvent):
-        """列出所有绑定的光遇ID"""
-        user_id = event.get_sender_id()
-        user_data = await self._get_user_sky_data(user_id)
-        
-        if "_error" in user_data:
-            yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-            return
-        
-        if not user_data["ids"]:
-            yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定\n\n💡 Tips：这里需要绑定游戏内短ID哦")
-            return
-        
-        result = ["📋 已绑定的ID列表：\n"]
-        for i, sky_id in enumerate(user_data["ids"], 1):
-            marker = " (当前)" if sky_id == user_data["current_id"] else ""
-            result.append(f"{i}. {sky_id}{marker}")
-        
-        yield event.plain_result("\n".join(result))
-    
-    # ==================== 光翼查询功能 ====================
-    
-    def _format_wing_map_stats(self, map_stats: Dict) -> str:
-        """格式化光翼地图统计为可读文本"""
-        if not map_stats:
-            return ""
-        
-        lines = []
-        # 定义地图顺序，让显示更有序
-        map_order = ["晨岛", "云野", "雨林", "霞谷", "暮土", "禁阁", "暴风眼", "破晓季"]
-        
-        # 先按固定顺序排列存在的地图
-        sorted_maps = []
-        for map_name in map_order:
-            if map_name in map_stats:
-                sorted_maps.append((map_name, map_stats[map_name]))
-        
-        # 添加其他未在顺序列表中的地图
-        for map_name, map_data in map_stats.items():
-            if map_name not in map_order:
-                sorted_maps.append((map_name, map_data))
-        
-        for map_name, map_data in sorted_maps:
-            if isinstance(map_data, dict):
-                total = map_data.get("total", 0)
-                collected = map_data.get("collected", 0)
-                uncollected = map_data.get("uncollected", 0)
-                
-                # 计算未收集（如果没有uncollected字段，用total-collected）
-                if uncollected == 0 and total > 0:
-                    uncollected = total - collected
-                
-                # 使用emoji标记状态
-                if uncollected == 0:
-                    status = "✅"
-                    detail = "已拿满"
-                else:
-                    status = "❌"
-                    detail = f"缺{uncollected}个"
-                
-                line = f"   {status} {map_name}: {collected}/{total}个 ({detail})"
-                lines.append(line)
+            logger.info(f"正在执行插件初始化 (来源: {source})...")
+            # 检查插件是否被启用 (Fix for empty plugin_set issue)
+            if self.context:
+                config = self.context.get_config()
+                # ... 为空修正逻辑保持不变 ...
+                plugin_set = config.get("plugin_set", [])
+                if (
+                    isinstance(plugin_set, list)
+                    and "astrbot_plugin_qq_group_daily_analysis" not in plugin_set
+                ):
+                    # 此时不强制修改 config，但可以记录日志
+                    pass
+
+            # 初始化所有bot实例
+            discovered = await self.bot_manager.initialize_from_config()
+            if discovered:
+                logger.info("Bot管理器初始化成功")
+                await self.template_preview_router.ensure_handlers_registered(
+                    self.context
+                )
+                # 启动调度器
+                self.auto_scheduler.schedule_jobs(self.context)
             else:
-                # 处理简单数值格式
-                lines.append(f"   • {map_name}: {map_data}个")
-        
-        return "\n".join(lines) + "\n" if lines else ""
-    
-    @filter.command("光翼查询")
-    async def query_wings(self, event: AstrMessageEvent, sky_id: Optional[str] = None):
-        """查询光翼信息"""
-        user_id = event.get_sender_id()
-        
-        if sky_id is None:
-            user_data = await self._get_user_sky_data(user_id)
-            
-            if "_error" in user_data:
-                yield event.plain_result(f"❌ 数据异常：{user_data['_error']}")
-                return
-            
-            sky_id = user_data.get("current_id")
-            if not sky_id:
-                if not user_data["ids"]:
-                    yield event.plain_result("⚠️ 您还没有绑定任何ID！\n使用「光遇绑定 <ID>」来绑定\n\n💡 Tips：这里需要绑定游戏内短ID哦")
+                logger.warning("Bot管理器初始化失败，未发现任何适配器")
+
+            # 始终启动重试管理器
+            await self.retry_manager.start()
+
+            self._initialized = True
+            logger.info("插件任务注册完成")
+
+        except Exception as e:
+            logger.error(f"插件初始化失败: {e}", exc_info=True)
+
+    async def terminate(self):
+        """插件被卸载/停用时调用，清理资源"""
+        try:
+            logger.info("开始清理QQ群日常分析插件资源...")
+
+            # 停止自动调度器
+            if self.auto_scheduler:
+                logger.info("正在停止自动调度器...")
+                self.auto_scheduler.unschedule_jobs(self.context)
+                logger.info("自动调度器已停止")
+
+            if self.retry_manager:
+                await self.retry_manager.stop()
+            if self.template_preview_router:
+                await self.template_preview_router.unregister_handlers()
+
+            # 释放实例属性引用（插件卸载后不再使用）
+            self.auto_scheduler = None
+            self.bot_manager = None
+            self.report_generator = None
+            self.config_manager = None
+            self.message_processing_service = None
+            self.telegram_group_registry = None
+            self.template_preview_router = None
+            self.telegram_template_preview_handler = None
+
+            logger.info("QQ群日常分析插件资源清理完成")
+
+        except Exception as e:
+            logger.error(f"插件资源清理失败: {e}")
+
+    # ==================== Telegram 消息拦截器 ====================
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
+    async def intercept_telegram_messages(self, event: AstrMessageEvent):
+        """
+        拦截 Telegram 群消息并存储到数据库
+
+        委托给 MessageProcessingService 处理
+        """
+        try:
+            await self.message_processing_service.process_message(event)
+        except (ValueError, RuntimeError) as e:
+            logger.warning(f"[Telegram] 消息存储失败: {e}")
+        except Exception as e:
+            logger.error(f"[Telegram] 消息存储异常: {e}", exc_info=True)
+
+    async def get_telegram_seen_group_ids(
+        self, platform_id: str | None = None
+    ) -> list[str]:
+        """读取 Telegram 已见群/话题列表（给调度器回退使用）。"""
+        return await self.telegram_group_registry.get_all_group_ids(platform_id)
+
+    def _get_group_id_from_event(self, event: AstrMessageEvent) -> str | None:
+        """从消息事件中安全获取群组 ID"""
+        # 保留此辅助方法，因为在其他 command 中仍被频繁使用
+        try:
+            group_id = event.get_group_id()
+            return group_id if group_id else None
+        except Exception:
+            return None
+
+    def _get_platform_id_from_event(self, event: AstrMessageEvent) -> str:
+        """从消息事件中获取平台唯一 ID"""
+        # 保留此辅助方法，因为在其他 command 中仍被频繁使用
+        try:
+            return event.get_platform_id()
+        except Exception:
+            # 后备方案：从元数据获取
+            if (
+                hasattr(event, "platform_meta")
+                and event.platform_meta
+                and hasattr(event.platform_meta, "id")
+            ):
+                return event.platform_meta.id
+            return "default"
+
+    # ================================================================
+    # 图片报告上传到群文件 / 群相册（仅 QQ 平台 image 格式）
+    # ================================================================
+
+    async def _try_upload_image(self, group_id: str, image_url: str, platform_id: str):
+        """
+        尝试将图片报告上传到群文件和/或群相册（静默处理，失败仅日志提示）。
+        """
+        import base64
+        import re
+        import tempfile
+        from datetime import datetime
+
+        enable_file = self.config_manager.get_enable_group_file_upload()
+        enable_album = self.config_manager.get_enable_group_album_upload()
+        if not enable_file and not enable_album:
+            return
+
+        adapter = self.bot_manager.get_adapter(platform_id)
+        if not adapter or not hasattr(adapter, "upload_group_file_to_folder"):
+            return
+
+        # 1. 构造一个更友好的文件名
+        now = datetime.now()
+        timestamp = now.strftime("%H%M")
+        date_str = now.strftime("%Y-%m-%d")
+
+        # 默认基础名和后缀
+        ext = (
+            ".jpg"
+            if (".jpg" in image_url.lower() or ".jpeg" in image_url.lower())
+            else ".png"
+        )
+        nice_filename = f"群分析报告_{group_id}_{date_str}_{timestamp}{ext}"
+
+        try:
+            # 尝试通过适配器获取群名称，使文件名更具辨识度
+            group_info = await adapter.get_group_info(group_id)
+            if group_info and group_info.group_name:
+                # 过滤非法文件名字符：\ / : * ? " < > |
+                safe_name = re.sub(r'[\\/:*?"<>|]', "", group_info.group_name).strip()
+                if safe_name:
+                    nice_filename = (
+                        f"群分析报告_{safe_name}_{date_str}_{timestamp}{ext}"
+                    )
+        except Exception:
+            pass
+
+        # 2. 将内容准备为文件或数据
+        image_file = None
+        created_temp = False
+        try:
+            if image_url.startswith("base64://"):
+                data = base64.b64decode(image_url[len("base64://") :])
+            elif image_url.startswith("data:"):
+                parts = image_url.split(",", 1)
+                data = base64.b64decode(parts[1]) if len(parts) == 2 else None
+            elif os.path.isfile(image_url):
+                if os.path.isabs(image_url):
+                    image_file = image_url
                 else:
-                    yield event.plain_result("⚠️ 请先使用「光遇切换 <序号>」设置当前ID！")
+                    image_file = os.path.abspath(image_url)
+                data = None
+            else:
                 return
-        
-        # URL 编码用户输入，防止参数污染
-        encoded_id = quote(str(sky_id), safe='')
-        url = f"{self.WING_QUERY_API}?key={self.wing_query_key}&id={encoded_id}&type=json"
-        data = await self._fetch_json(url, use_cache=False)
-        
-        if not data or not data.get("success"):
-            error_msg = data.get("message", "未知错误") if data else "网络请求失败"
-            yield event.plain_result(f"❌ 查询失败：{error_msg}")
-            return
-        
-        statistics = data.get("statistics", {})
-        role_id = data.get("roleId", "未知")
-        timestamp = data.get("timestamp", "")
-        
-        # 格式化时间戳
-        time_str = timestamp
-        if "T" in timestamp:
-            try:
-                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-            except:
-                pass
-        
-        result = f"🪽 光翼查询结果\n"
-        result += f"📍 ID: {role_id}\n"
-        result += f"🕐 数据时间: {time_str}\n\n"
-        
-        total = statistics.get("total", 0)
-        collected = statistics.get("collected", 0)
-        uncollected = statistics.get("uncollected", 0)
-        
-        result += f"📊 光翼统计:\n"
-        result += f"   总数: {total}\n"
-        result += f"   已收集: {collected}\n"
-        result += f"   未收集: {uncollected}\n\n"
-        
-        # 各地图详细统计
-        map_stats = statistics.get("map_statistics", {})
-        if map_stats:
-            result += "📍 各地图光翼详情:\n"
-            result += self._format_wing_map_stats(map_stats)
-        
-        # 计算总进度百分比
-        if total > 0:
-            percentage = (collected / total) * 100
-            result += f"\n📈 总进度: {percentage:.1f}% ({collected}/{total})"
-        
-        yield event.plain_result(result)
-    
-    @filter.command("光翼统计")
-    async def count_wings(self, event: AstrMessageEvent):
-        """获取全图光翼统计"""
-        data = await self._get_wing_count_data()
-        result = self._format_wing_count_result(data)
-        yield event.plain_result(result)
-    
-    # ==================== 信息查询命令（复用核心逻辑）====================
-    
-    @filter.command("每日任务")
-    async def daily_tasks(self, event: AstrMessageEvent):
-        """获取每日任务图片"""
-        yield event.plain_result("🌟 光遇今日每日任务")
-        yield event.image_result(self._get_daily_task_image_url())
-    
-    @filter.command("季节蜡烛")
-    async def season_candles(self, event: AstrMessageEvent):
-        """获取季节蜡烛位置图片"""
-        yield event.plain_result("🕯️ 光遇今日季节蜡烛位置")
-        yield event.image_result(self._get_season_candle_image_url())
-    
-    @filter.command("大蜡烛")
-    async def big_candles(self, event: AstrMessageEvent):
-        """获取大蜡烛位置图片"""
-        yield event.plain_result("🕯️ 光遇今日大蜡烛位置")
-        yield event.image_result(self._get_big_candle_image_url())
-    
-    @filter.command("免费魔法")
-    async def free_magic(self, event: AstrMessageEvent):
-        """获取免费魔法图片"""
-        yield event.plain_result("✨ 光遇今日免费魔法")
-        yield event.image_result(self._get_magic_image_url())
-    
-    @filter.command("季节进度")
-    async def season_progress(self, event: AstrMessageEvent):
-        """获取季节进度信息"""
-        data = await self._get_season_progress_data()
-        result = self._format_season_result(data)
-        yield event.plain_result(result)
-    
-    @filter.command("碎石信息")
-    async def debris_info(self, event: AstrMessageEvent):
-        """获取今日碎石信息"""
-        data = await self._get_debris_info_data()
-        result = self._format_debris_result(data)
-        yield event.plain_result(result)
-    
-    @filter.command("复刻先祖")
-    async def traveling_spirit(self, event: AstrMessageEvent):
-        """获取复刻先祖信息"""
-        data = await self._get_traveling_spirit_data()
-        result = self._format_traveling_spirit_result(data)
-        yield event.plain_result(result)
-    
-    @filter.command("献祭信息")
-    async def sacrifice_info(self, event: AstrMessageEvent):
-        """获取献祭信息"""
-        yield event.plain_result(SACRIFICE_INFO_TEXT)
-    
-    @filter.command("老奶奶时间")
-    async def grandma_schedule(self, event: AstrMessageEvent):
-        """获取老奶奶用餐时间"""
-        yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
-    
-    @filter.command("光遇状态")
-    async def server_status(self, event: AstrMessageEvent):
-        """获取光遇服务器状态"""
-        data = await self._get_server_status_data()
-        result = self._format_server_status_result(data)
-        yield event.plain_result(result)
-    
-    # ==================== 定时任务 ====================
-    
-    async def _scheduler_loop(self):
-        """定时任务调度器（动态计算睡眠时间，避免时间漂移）"""
-        last_date = None
-        
-        while self._running:
-            try:
-                now = self._get_beijing_time()
-                current_date = now.strftime("%Y-%m-%d")
-                current_minute = now.minute
-                current_hour = now.hour
-                
-                # [修复] 日期变化时清理过期记录，防止内存无限增长
-                if last_date != current_date:
-                    if last_date is not None:
-                        self._cleanup_last_executed(current_date)
-                    last_date = current_date
-                
-                # [修复] 每日任务推送 - 使用"时间窗口"检查（>= 目标时间），避免精确匹配漏触发
-                if self.enable_daily_task_push:
-                    task_key = f"daily_task_{current_date}"
-                    target_hour, target_min = map(int, self.daily_task_push_time.split(':'))
-                    
-                    # 检查是否已经到了或过了推送时间，且今天未执行
-                    is_time_reached = (current_hour > target_hour or 
-                                      (current_hour == target_hour and current_minute >= target_min))
-                    
-                    if is_time_reached and self._last_executed.get(task_key) != current_date:
-                        self._last_executed[task_key] = current_date
-                        self._create_tracked_task(self._push_daily_tasks())
-                
-                # [修复] 老奶奶提醒 - 使用"时间窗口"检查（整点后1分钟内都算）
-                if self.enable_grandma_reminder:
-                    if current_hour in [8, 10, 12, 16, 18, 20]:
-                        grandma_key = f"grandma_{current_date}_{current_hour}"
-                        # 整点后1分钟内都算，防止跳过整点
-                        if current_minute <= 1 and self._last_executed.get(grandma_key) != current_date:
-                            self._last_executed[grandma_key] = current_date
-                            self._create_tracked_task(self._push_grandma_reminder())
-                
-                # [修复] 献祭刷新提醒（周六00:00）- 使用"时间窗口"检查（00:00-00:01）
-                if self.enable_sacrifice_reminder:
-                    if now.weekday() == 5 and current_hour == 0:  # 周六
-                        sacrifice_key = f"sacrifice_{current_date}"
-                        # 00:00到00:01之间都算
-                        if current_minute <= 1 and self._last_executed.get(sacrifice_key) != current_date:
-                            self._last_executed[sacrifice_key] = current_date
-                            self._create_tracked_task(self._push_sacrifice_reminder())
-                
-                # [修复] 碎石提醒（每天08:00）- 使用"时间窗口"检查（08:00-08:01）
-                if self.enable_debris_reminder:
-                    if current_hour == 8:
-                        debris_key = f"debris_{current_date}"
-                        # 08:00到08:01之间都算
-                        if current_minute <= 1 and self._last_executed.get(debris_key) != current_date:
-                            self._last_executed[debris_key] = current_date
-                            self._create_tracked_task(self._push_debris_info())
-                
-                # 动态计算睡眠时间，确保每分钟整点检查（避免时间漂移）
-                sleep_seconds = 60 - self._get_beijing_time().second
-                await asyncio.sleep(sleep_seconds)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"定时任务出错: {e}")
-                await asyncio.sleep(60 - self._get_beijing_time().second)
-    
-    async def _push_daily_tasks(self):
-        """推送每日任务（并发发送，避免阻塞）"""
-        if not self.push_groups:
-            return
-        
-        image_url = self._get_daily_task_image_url()
-        
-        async def send_to_group(group_id: str):
-            try:
-                # [修复] 先发送文本提示
-                await self.context.send_message(group_id, "🌟 光遇今日每日任务")
-                
-                # [修复] 使用 CQ 码发送图片，确保平台识别为图片而非文本链接
-                # 如果平台支持 CQ:image，会显示图片；如果不支持，至少会显示链接
-                image_cq = f"[CQ:image,file={image_url}]"
-                await self.context.send_message(group_id, image_cq)
-                
-                # [修复] 添加备用文本链接，防止 CQ 码不被支持时用户看不到内容
-                await self.context.send_message(group_id, f"💡 如果图片未显示，请点击链接查看：{image_url}")
-            except Exception as e:
-                logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
-        
-        # 并发发送给所有群组
-        tasks = [send_to_group(gid) for gid in self.push_groups]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def _push_grandma_reminder(self):
-        """推送老奶奶用餐提醒（并发发送，避免阻塞）"""
-        if not self.push_groups:
-            return
-        
-        message = "🍲 老奶奶开饭啦！\n\n"
-        message += "📍 位置: 雨林隐藏图\n"
-        message += "⏰ 用餐时间约30分钟\n"
-        message += "💡 带上火盆或火把可以自动收集烛火哦~"
-        
-        async def send_to_group(group_id: str):
-            try:
-                await self.context.send_message(group_id, message)
-            except Exception as e:
-                logger.error(f"推送老奶奶提醒到群组 {group_id} 失败: {e}")
-        
-        # 并发发送给所有群组
-        tasks = [send_to_group(gid) for gid in self.push_groups]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def _push_sacrifice_reminder(self):
-        """推送献祭刷新提醒（并发发送，避免阻塞）"""
-        if not self.push_groups:
-            return
-        
-        message = "🔥 献祭已刷新！\n\n"
-        message += "📅 每周六凌晨00:00刷新\n"
-        message += "💡 记得去暴风眼献祭获取升华蜡烛~"
-        
-        async def send_to_group(group_id: str):
-            try:
-                await self.context.send_message(group_id, message)
-            except Exception as e:
-                logger.error(f"推送献祭提醒到群组 {group_id} 失败: {e}")
-        
-        # 并发发送给所有群组
-        tasks = [send_to_group(gid) for gid in self.push_groups]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def _push_debris_info(self):
-        """推送碎石信息（并发发送，避免阻塞）"""
-        if not self.push_groups:
-            return
-        
-        data = await self._get_debris_info_data()
-        if not data.get("has_debris"):
-            return
-        
-        message = f"💎 今日碎石信息\n\n"
-        message += f"📍 地图: {data['map_name']}\n"
-        message += "💡 完成碎石任务可以获得升华蜡烛奖励~"
-        
-        async def send_to_group(group_id: str):
-            try:
-                await self.context.send_message(group_id, message)
-            except Exception as e:
-                logger.error(f"推送碎石信息到群组 {group_id} 失败: {e}")
-        
-        # 并发发送给所有群组
-        tasks = [send_to_group(gid) for gid in self.push_groups]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # ==================== 菜单命令 ====================
-    
-    @filter.command("光遇菜单")
-    async def sky_menu(self, event: AstrMessageEvent):
-        """光遇菜单"""
-        menu = """🌟 光遇助手菜单
 
-📋 信息查询:
-• 每日任务 - 获取今日每日任务图片
-• 季节蜡烛 - 获取季节蜡烛位置图片
-• 大蜡烛 - 获取大蜡烛位置图片
-• 免费魔法 - 获取今日免费魔法图片
-• 季节进度 - 查看当前季节进度
-• 碎石信息 - 查看今日碎石信息
-• 复刻先祖 - 查看当前复刻先祖
-• 献祭信息 - 查看献祭相关信息
-• 老奶奶时间 - 查看老奶奶用餐时间
-• 光遇状态 - 查看光遇服务器排队状态
+            if data and not image_file:
+                # 使用优化的文件名创建临时文件
+                image_file = os.path.join(tempfile.gettempdir(), nice_filename)
+                with open(image_file, "wb") as f:
+                    f.write(data)
+                created_temp = True
 
-🪽 光翼查询:
-• 光遇绑定 <ID> - 绑定光遇ID
-• 光遇切换 <序号> - 切换当前ID
-• 光遇删除 <序号> - 删除绑定的ID
-• 光遇ID列表 - 查看所有绑定的ID
-• 光翼查询 - 查询当前ID的光翼
-• 光翼查询 <ID> - 查询指定ID的光翼
-• 光翼统计 - 查看全图光翼统计
+            if not image_file:
+                return
 
-💡 提示: 可以直接用自然语言与我对话查询光遇信息！"""
-        
-        yield event.plain_result(menu)
+            # 3. 执行上传：群文件
+            if enable_file:
+                try:
+                    folder_name = self.config_manager.get_group_file_folder()
+                    folder_id = None
+                    if folder_name:
+                        folder_id = await adapter.find_or_create_folder(  # type: ignore[attr-defined]
+                            group_id, folder_name
+                        )
+                    await adapter.upload_group_file_to_folder(  # type: ignore[attr-defined]
+                        group_id=group_id,
+                        file_path=image_file,
+                        folder_id=folder_id,
+                        filename=nice_filename,  # 显式传递漂亮的文件名
+                    )
+                except Exception as e:
+                    logger.warning(f"群文件上传失败 (群 {group_id}): {e}")
+
+            if enable_album and hasattr(adapter, "upload_group_album"):
+                try:
+                    album_name = self.config_manager.get_group_album_name()
+                    album_id = None
+                    if album_name and hasattr(adapter, "find_album_id"):
+                        album_id = await adapter.find_album_id(group_id, album_name)  # type: ignore[attr-defined]
+                    await adapter.upload_group_album(  # type: ignore[attr-defined]
+                        group_id, image_file, album_id=album_id, album_name=album_name
+                    )
+                except Exception as e:
+                    logger.warning(f"群相册上传失败 (群 {group_id}): {e}")
+        except Exception as e:
+            logger.warning(f"图片上传处理异常: {e}")
+        finally:
+            if created_temp and image_file and os.path.exists(image_file):
+                try:
+                    os.remove(image_file)
+                except OSError:
+                    pass
+
+    @filter.command("群分析", alias={"group_analysis"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def analyze_group_daily(
+        self, event: AstrMessageEvent, days: int | None = None
+    ):
+        """
+        分析群聊日常活动（跨平台支持）
+        用法: /群分析 [天数]
+        """
+        group_id = self._get_group_id_from_event(event)
+        platform_id = self._get_platform_id_from_event(event)
+
+        if not group_id:
+            yield event.plain_result("❌ 请在群聊中使用此命令")
+            return
+
+        # 更新bot实例
+        self.bot_manager.update_from_event(event)
+
+        # 优先使用 UMO 进行权限检查 (兼容白名单 UMO 格式)
+        check_target = getattr(event, "unified_msg_origin", None)
+        if not check_target:
+            check_target = f"{platform_id}:GroupMessage:{group_id}"
+
+        if not self.config_manager.is_group_allowed(check_target):
+            # Fallback checks (simple ID) are handled inside is_group_allowed logic if list item has no colon
+            # But if list item HAS colon, we need precise match.
+            # If prompt fails, try simple ID as fallback for permissive cases?
+            # No, config_manager.is_group_allowed already handles simple ID matching if whitelist item is simple ID.
+            yield event.plain_result("❌ 此群未启用日常分析功能")
+            return
+
+        yield event.plain_result("🔍 正在启动跨平台分析引擎，正在拉取最近消息...")
+
+        try:
+            # 调用 DDD 应用级服务
+            result = await self.analysis_service.execute_daily_analysis(
+                group_id=group_id, platform_id=platform_id, manual=True
+            )
+
+            if not result.get("success"):
+                reason = result.get("reason")
+                if reason == "no_messages":
+                    yield event.plain_result("❌ 未找到足够的群聊记录")
+                else:
+                    yield event.plain_result("❌ 分析失败，原因未知")
+                return
+
+            yield event.plain_result(
+                f"📊 已获取{result['messages_count']}条消息，正在生成渲染报告..."
+            )
+
+            analysis_result = result["analysis_result"]
+            adapter = result["adapter"]
+            output_format = self.config_manager.get_output_format()
+
+            # 定义头像获取回调 (Infrastructure delegate)
+            async def avatar_getter(user_id: str) -> str | None:
+                return await adapter.get_user_avatar_url(user_id)
+
+            # 定义昵称获取回调
+            async def nickname_getter(user_id: str) -> str | None:
+                try:
+                    member = await adapter.get_member_info(group_id, user_id)
+                    if member:
+                        return member.card or member.nickname
+                except Exception:
+                    pass
+                return None
+
+            if output_format == "image":
+                (
+                    image_url,
+                    html_content,
+                ) = await self.report_generator.generate_image_report(
+                    analysis_result,
+                    group_id,
+                    self.html_render,
+                    avatar_getter=avatar_getter,
+                    nickname_getter=nickname_getter,
+                )
+
+                if image_url:
+                    # 优先使用适配器的 send_image (由插件适配器统一处理 Base64 转换和路径问题)
+                    # 不再使用 yield event.image_result 回退，防止适配器超时回复导致重复发送图片
+                    await adapter.send_image(group_id, image_url)
+
+                    # 上传到群文件/群相册 (属于附加功能，不影响消息发送)
+                    await self._try_upload_image(group_id, image_url, platform_id)
+                elif html_content:
+                    yield event.plain_result("⚠️ 群分析报告图片发送失败，自动重试中。")
+                    # 使用带提示词的重试任务，确保排队发送时视觉一致
+                    await self.retry_manager.add_task(
+                        html_content,
+                        analysis_result,
+                        group_id,
+                        platform_id,
+                        caption="📊 每日群聊分析报告已生成：",
+                    )
+                else:
+                    text_report = self.report_generator.generate_text_report(
+                        analysis_result
+                    )
+                    yield event.plain_result(
+                        f"⚠️ 图片生成失败，回退文本：\n\n{text_report}"
+                    )
+
+            elif output_format == "pdf":
+                pdf_path = await self.report_generator.generate_pdf_report(
+                    analysis_result,
+                    group_id,
+                    avatar_getter=avatar_getter,
+                    nickname_getter=nickname_getter,
+                )
+                if pdf_path:
+                    if not await adapter.send_file(group_id, pdf_path):
+                        from pathlib import Path
+
+                        yield event.chain_result(
+                            [File(name=Path(pdf_path).name, file=pdf_path)]
+                        )
+                else:
+                    yield event.plain_result("⚠️ PDF 生成失败。")
+
+            else:
+                text_report = self.report_generator.generate_text_report(
+                    analysis_result
+                )
+                if not await adapter.send_text(group_id, text_report):
+                    yield event.plain_result(text_report)
+
+        except Exception as e:
+            logger.error(f"群分析失败: {e}", exc_info=True)
+            yield event.plain_result(
+                f"❌ 分析失败: {str(e)}。请检查网络连接和LLM配置，或联系管理员"
+            )
+
+    @filter.command("设置格式", alias={"set_format"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def set_output_format(self, event: AstrMessageEvent, format_type: str = ""):
+        """
+        设置分析报告输出格式（跨平台支持）
+        用法: /设置格式 [image|text|pdf]
+        """
+        group_id = self._get_group_id_from_event(event)
+
+        if not group_id:
+            yield event.plain_result("❌ 请在群聊中使用此命令")
+            return
+
+        if not format_type:
+            current_format = self.config_manager.get_output_format()
+            pdf_status = (
+                "✅"
+                if self.config_manager.playwright_available
+                else "❌ (需安装 Playwright)"
+            )
+            yield event.plain_result(f"""📊 当前输出格式: {current_format}
+
+可用格式:
+• image - 图片格式 (默认)
+• text - 文本格式
+• pdf - PDF 格式 {pdf_status}
+
+用法: /设置格式 [格式名称]""")
+            return
+
+        format_type = format_type.lower()
+        if format_type not in ["image", "text", "pdf"]:
+            yield event.plain_result("❌ 无效的格式类型，支持: image, text, pdf")
+            return
+
+        if format_type == "pdf" and not self.config_manager.playwright_available:
+            yield event.plain_result("❌ PDF 格式不可用，请使用 /安装PDF 命令安装依赖")
+            return
+
+        self.config_manager.set_output_format(format_type)
+        yield event.plain_result(f"✅ 输出格式已设置为: {format_type}")
+
+    @filter.command("设置模板", alias={"set_template"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def set_report_template(
+        self, event: AstrMessageEvent, template_input: str = ""
+    ):
+        """
+        设置分析报告模板（跨平台支持）
+        用法: /设置模板 [模板名称或序号]
+        """
+        # 命令由插件处理，禁用默认 LLM 回退。
+        event.should_call_llm(True)
+
+        available_templates = (
+            await self.template_command_service.list_available_templates()
+        )
+
+        if not template_input:
+            current_template = self.config_manager.get_report_template()
+            template_list_str = "\n".join(
+                [f"【{i}】{t}" for i, t in enumerate(available_templates, start=1)]
+            )
+            yield event.plain_result(f"""🎨 当前报告模板: {current_template}
+
+可用模板:
+{template_list_str}
+
+用法: /设置模板 [模板名称或序号]
+💡 使用 /查看模板 查看预览图""")
+            return
+
+        template_name, parse_error = self.template_command_service.parse_template_input(
+            template_input, available_templates
+        )
+        if parse_error:
+            yield event.plain_result(parse_error)
+            return
+        assert template_name is not None
+
+        if not await self.template_command_service.template_exists(template_name):
+            yield event.plain_result(f"❌ 模板 '{template_name}' 不存在")
+            return
+
+        self.config_manager.set_report_template(template_name)
+        yield event.plain_result(f"✅ 报告模板已设置为: {template_name}")
+
+    @filter.command("查看模板", alias={"view_templates"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def view_templates(self, event: AstrMessageEvent):
+        """
+        查看所有可用的报告模板及预览图（跨平台支持）
+        用法: /查看模板
+        """
+        # 命令由插件处理，禁用默认 LLM 回退。
+        event.should_call_llm(True)
+
+        available_templates = (
+            await self.template_command_service.list_available_templates()
+        )
+
+        if not available_templates:
+            yield event.plain_result("❌ 未找到任何可用的报告模板")
+            return
+
+        platform_id = self._get_platform_id_from_event(event)
+        await self.template_preview_router.ensure_handlers_registered(self.context)
+        (
+            handled,
+            handler_results,
+        ) = await self.template_preview_router.handle_view_templates(
+            event=event,
+            platform_id=platform_id,
+            available_templates=available_templates,
+        )
+        if handled:
+            for result in handler_results:
+                yield result
+            return
+
+        current_template = self.config_manager.get_report_template()
+        bot_id = event.get_self_id()
+        preview_nodes = self.template_command_service.build_template_preview_nodes(
+            available_templates=available_templates,
+            current_template=current_template,
+            bot_id=bot_id,
+        )
+        yield event.chain_result([preview_nodes])
+
+    @filter.command("安装PDF", alias={"install_pdf"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def install_pdf_deps(self, event: AstrMessageEvent):
+        """
+        安装 PDF 功能依赖（跨平台支持）
+        用法: /安装PDF
+        """
+        yield event.plain_result("🔄 开始安装 PDF 功能依赖，请稍候...")
+
+        try:
+            result = await PDFInstaller.install_playwright(self.config_manager)
+            yield event.plain_result(result)
+
+        except Exception as e:
+            logger.error(f"安装 PDF 依赖失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 安装过程中出现错误: {str(e)}")
+
+    @filter.command("分析设置", alias={"analysis_settings"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def analysis_settings(self, event: AstrMessageEvent, action: str = "status"):
+        """
+        管理分析设置（跨平台支持）
+        用法: /分析设置 [enable|disable|status|reload|test]
+        - enable: 启用当前群的分析功能
+        - disable: 禁用当前群的分析功能
+        - status: 查看当前状态
+        - reload: 重新加载配置并重启定时任务
+        - test: 测试自动分析功能
+        - incremental_debug: 切换增量分析立即报告模式（调试用）
+        """
+        group_id = self._get_group_id_from_event(event)
+
+        if not group_id:
+            yield event.plain_result("❌ 请在群聊中使用此命令")
+            return
+
+        elif action == "enable":
+            mode = self.config_manager.get_group_list_mode()
+            target_id = event.unified_msg_origin or group_id  # 优先使用 UMO
+
+            if mode == "whitelist":
+                glist = self.config_manager.get_group_list()
+                # 检查 UMO 或 Group ID 是否已在列表中
+                if not self.config_manager.is_group_allowed(target_id):
+                    glist.append(target_id)
+                    self.config_manager.set_group_list(glist)
+                    yield event.plain_result(
+                        f"✅ 已将当前群加入白名单\nID: {target_id}"
+                    )
+                    self.auto_scheduler.schedule_jobs(self.context)
+                else:
+                    yield event.plain_result("ℹ️ 当前群已在白名单中")
+            elif mode == "blacklist":
+                glist = self.config_manager.get_group_list()
+
+                # 尝试移除 UMO 和 Group ID
+                removed = False
+                if target_id in glist:
+                    glist.remove(target_id)
+                    removed = True
+                if group_id in glist:
+                    glist.remove(group_id)
+                    removed = True
+
+                if removed:
+                    self.config_manager.set_group_list(glist)
+                    yield event.plain_result("✅ 已将当前群从黑名单移除")
+                    self.auto_scheduler.schedule_jobs(self.context)
+                else:
+                    yield event.plain_result("ℹ️ 当前群不在黑名单中")
+            else:
+                yield event.plain_result("ℹ️ 当前为无限制模式，所有群聊默认启用")
+
+        elif action == "disable":
+            mode = self.config_manager.get_group_list_mode()
+            target_id = event.unified_msg_origin or group_id  # 优先使用 UMO
+
+            if mode == "whitelist":
+                glist = self.config_manager.get_group_list()
+
+                # 尝试移除 UMO 和 Group ID
+                removed = False
+                if target_id in glist:
+                    glist.remove(target_id)
+                    removed = True
+                if group_id in glist:
+                    glist.remove(group_id)
+                    removed = True
+
+                if removed:
+                    self.config_manager.set_group_list(glist)
+                    yield event.plain_result("✅ 已将当前群从白名单移除")
+                    self.auto_scheduler.schedule_jobs(self.context)
+                else:
+                    yield event.plain_result("ℹ️ 当前群不在白名单中")
+            elif mode == "blacklist":
+                glist = self.config_manager.get_group_list()
+                # 检查 UMO 或 Group ID 是否已在列表中
+                if self.config_manager.is_group_allowed(
+                    target_id
+                ):  # 如果允许，说明不在黑名单
+                    glist.append(target_id)
+                    self.config_manager.set_group_list(glist)
+                    yield event.plain_result(
+                        f"✅ 已将当前群加入黑名单\nID: {target_id}"
+                    )
+                    self.auto_scheduler.schedule_jobs(self.context)
+                else:
+                    yield event.plain_result("ℹ️ 当前群已在黑名单中")
+            else:
+                yield event.plain_result(
+                    "ℹ️ 当前为无限制模式，如需禁用请切换到黑名单模式"
+                )
+
+        elif action == "reload":
+            self.auto_scheduler.schedule_jobs(self.context)
+            yield event.plain_result("✅ 已重新加载配置并重启定时任务")
+
+        elif action == "test":
+            check_target = getattr(event, "unified_msg_origin", None)
+            if not check_target:
+                check_target = (
+                    f"{self._get_platform_id_from_event(event)}:GroupMessage:{group_id}"
+                )
+
+            if not self.config_manager.is_group_allowed(check_target):
+                yield event.plain_result("❌ 请先启用当前群的分析功能")
+                return
+
+            yield event.plain_result("🧪 开始测试自动分析功能...")
+
+            # 更新bot实例（用于测试）
+            self.bot_manager.update_from_event(event)
+
+            try:
+                await self.auto_scheduler._perform_auto_analysis_for_group(group_id)
+                yield event.plain_result("✅ 自动分析测试完成，请查看群消息")
+            except Exception as e:
+                yield event.plain_result(f"❌ 自动分析测试失败: {str(e)}")
+
+        elif action == "incremental_debug":
+            current_state = self.config_manager.get_incremental_report_immediately()
+            new_state = not current_state
+            self.config_manager.set_incremental_report_immediately(new_state)
+            status_text = "已启用" if new_state else "已禁用"
+            yield event.plain_result(f"✅ 增量分析立即报告模式: {status_text}")
+
+        else:  # status
+            check_target = getattr(event, "unified_msg_origin", None)
+            if not check_target:
+                check_target = (
+                    f"{self._get_platform_id_from_event(event)}:GroupMessage:{group_id}"
+                )
+
+            is_allowed = self.config_manager.is_group_allowed(check_target)
+            status = "已启用" if is_allowed else "未启用"
+            mode = self.config_manager.get_group_list_mode()
+
+            auto_status = (
+                "已启用" if self.config_manager.get_enable_auto_analysis() else "未启用"
+            )
+            auto_time = self.config_manager.get_auto_analysis_time()
+
+            pdf_status = PDFInstaller.get_pdf_status(self.config_manager)
+            output_format = self.config_manager.get_output_format()
+            min_threshold = self.config_manager.get_min_messages_threshold()
+
+            # 增量分析状态
+            incremental_enabled = self.config_manager.get_incremental_enabled()
+            incremental_status_text = "未启用"
+            if incremental_enabled:
+                interval = self.config_manager.get_incremental_interval_minutes()
+                max_daily = self.config_manager.get_incremental_max_daily_analyses()
+                active_start = self.config_manager.get_incremental_active_start_hour()
+                active_end = self.config_manager.get_incremental_active_end_hour()
+                incremental_status_text = (
+                    f"已启用 (间隔{interval}分钟, 最多{max_daily}次/天, "
+                    f"活跃时段{active_start}:00-{active_end}:00)"
+                )
+
+            debug_report = self.config_manager.get_incremental_report_immediately()
+            debug_status = "✅ 开启" if debug_report else "❌ 关闭"
+
+            yield event.plain_result(f"""📊 当前群分析功能状态:
+• 群分析功能: {status} (模式: {mode})
+• 自动分析: {auto_status} ({auto_time})
+• 增量分析: {incremental_status_text}
+• 调试模式: {debug_status} (增量立即报告)
+• 输出格式: {output_format}
+• PDF 功能: {pdf_status}
+• 最小消息数: {min_threshold}
+
+💡 可用命令: enable, disable, status, reload, test, incremental_debug
+💡 支持的输出格式: image, text, pdf (图片和PDF包含活跃度可视化)
+💡 其他命令: /设置格式, /安装PDF, /增量状态""")
+
+    @filter.command("增量状态", alias={"incremental_status"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def incremental_status(self, event: AstrMessageEvent):
+        """查看当前增量分析状态（滑动窗口）"""
+        group_id = self._get_group_id_from_event(event)
+        if not group_id:
+            yield event.plain_result("❌ 请在群聊中使用此命令")
+            return
+
+        if not self.config_manager.get_incremental_enabled():
+            yield event.plain_result("ℹ️ 增量分析模式未启用，请在插件配置中开启")
+            return
+
+        import time as time_mod
+
+        # 计算滑动窗口范围
+        analysis_days = self.config_manager.get_analysis_days()
+        window_end = time_mod.time()
+        window_start = window_end - (analysis_days * 24 * 3600)
+
+        # 查询窗口内的批次
+        batches = await self.incremental_store.query_batches(
+            group_id, window_start, window_end
+        )
+
+        if not batches:
+            from datetime import datetime
+
+            start_str = datetime.fromtimestamp(window_start).strftime("%m-%d %H:%M")
+            end_str = datetime.fromtimestamp(window_end).strftime("%m-%d %H:%M")
+            yield event.plain_result(
+                f"📊 滑动窗口 ({start_str} ~ {end_str}) 内尚无增量分析数据"
+            )
+            return
+
+        # 合并批次获取聚合视图
+        state = self.incremental_merge_service.merge_batches(
+            batches, window_start, window_end
+        )
+        summary = state.get_summary()
+
+        yield event.plain_result(
+            f"📊 增量分析状态 (窗口: {summary['window']})\n"
+            f"• 分析次数: {summary['total_analyses']}\n"
+            f"• 累计消息: {summary['total_messages']}\n"
+            f"• 话题数: {summary['topics_count']}\n"
+            f"• 金句数: {summary['quotes_count']}\n"
+            f"• 参与者: {summary['participants']}\n"
+            f"• 高峰时段: {summary['peak_hours']}"
+        )
