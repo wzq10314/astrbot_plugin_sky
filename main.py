@@ -681,27 +681,13 @@ class SkyPlugin(Star):
     
     @filter.llm_tool(name="get_sky_wing_count")
     async def tool_get_wing_count(self, event: AstrMessageEvent):
-        '''获取光遇全图光翼总数统计（显示全图总共有多少光翼，非个人数据）
+        '''获取光遇全图光翼统计
         
-        当用户询问"光翼有多少个"、"全图光翼"、"总共多少光翼"时使用此工具。
-        注意：此工具只显示全图总数，不显示个人缺失情况。
+        当用户询问"光翼有多少个"、"全图光翼"、"光翼统计"时使用此工具。
         '''
         data = await self._get_wing_count_data()
         result = self._format_wing_count_result(data)
         yield event.plain_result(result)
-    
-    # [新增] 个人光翼查询 LLM 工具
-    @filter.llm_tool(name="query_user_wings")
-    async def tool_query_user_wings(self, event: AstrMessageEvent):
-        '''查询当前用户绑定的光遇ID的光翼详细情况，包括每个地图缺几个
-        
-        当用户询问"我缺几个光翼"、"我的光翼进度"、"查下我的光翼"、"我的光翼在哪里没拿"时使用此工具。
-        此工具会显示每个地图已收集/总数，并标注缺几个（如：❌ 雨林: 10/16个 (缺6个)）。
-        如果用户还没有绑定光遇ID，会提示用户先使用"光遇绑定 <ID>"命令绑定。
-        '''
-        # 复用现有的 query_wings 方法，不传入 sky_id 表示查询当前绑定的ID
-        async for ret in self.query_wings(event, sky_id=None):
-            yield ret
     
     @filter.llm_tool(name="get_sky_server_status")
     async def tool_get_server_status(self, event: AstrMessageEvent):
@@ -1002,7 +988,6 @@ class SkyPlugin(Star):
             try:
                 now = self._get_beijing_time()
                 current_date = now.strftime("%Y-%m-%d")
-                current_time_str = now.strftime("%H:%M")
                 current_minute = now.minute
                 current_hour = now.hour
                 
@@ -1012,36 +997,43 @@ class SkyPlugin(Star):
                         self._cleanup_last_executed(current_date)
                     last_date = current_date
                 
-                # [修复] 每日任务推送 - 使用分钟级窗口检查，避免精确匹配漏触发
+                # [修复] 每日任务推送 - 使用"时间窗口"检查（>= 目标时间），避免精确匹配漏触发
                 if self.enable_daily_task_push:
                     task_key = f"daily_task_{current_date}"
-                    # 检查是否是推送时间（允许1分钟的窗口）
-                    if (current_time_str == self.daily_task_push_time and 
-                        self._last_executed.get(task_key) != current_date):
+                    target_hour, target_min = map(int, self.daily_task_push_time.split(':'))
+                    
+                    # 检查是否已经到了或过了推送时间，且今天未执行
+                    is_time_reached = (current_hour > target_hour or 
+                                      (current_hour == target_hour and current_minute >= target_min))
+                    
+                    if is_time_reached and self._last_executed.get(task_key) != current_date:
                         self._last_executed[task_key] = current_date
                         self._create_tracked_task(self._push_daily_tasks())
                 
-                # [修复] 老奶奶提醒（整点触发）- 使用分钟窗口
+                # [修复] 老奶奶提醒 - 使用"时间窗口"检查（整点后1分钟内都算）
                 if self.enable_grandma_reminder:
-                    if current_minute == 0 and current_hour in [8, 10, 12, 16, 18, 20]:
+                    if current_hour in [8, 10, 12, 16, 18, 20]:
                         grandma_key = f"grandma_{current_date}_{current_hour}"
-                        if self._last_executed.get(grandma_key) != current_date:
+                        # 整点后1分钟内都算，防止跳过整点
+                        if current_minute <= 1 and self._last_executed.get(grandma_key) != current_date:
                             self._last_executed[grandma_key] = current_date
                             self._create_tracked_task(self._push_grandma_reminder())
                 
-                # [修复] 献祭刷新提醒（周六00:00）- 使用分钟窗口
+                # [修复] 献祭刷新提醒（周六00:00）- 使用"时间窗口"检查（00:00-00:01）
                 if self.enable_sacrifice_reminder:
-                    if now.weekday() == 5 and current_hour == 0 and current_minute == 0:
+                    if now.weekday() == 5 and current_hour == 0:  # 周六
                         sacrifice_key = f"sacrifice_{current_date}"
-                        if self._last_executed.get(sacrifice_key) != current_date:
+                        # 00:00到00:01之间都算
+                        if current_minute <= 1 and self._last_executed.get(sacrifice_key) != current_date:
                             self._last_executed[sacrifice_key] = current_date
                             self._create_tracked_task(self._push_sacrifice_reminder())
                 
-                # [修复] 碎石提醒（每天08:00）- 使用分钟窗口
+                # [修复] 碎石提醒（每天08:00）- 使用"时间窗口"检查（08:00-08:01）
                 if self.enable_debris_reminder:
-                    if current_hour == 8 and current_minute == 0:
+                    if current_hour == 8:
                         debris_key = f"debris_{current_date}"
-                        if self._last_executed.get(debris_key) != current_date:
+                        # 08:00到08:01之间都算
+                        if current_minute <= 1 and self._last_executed.get(debris_key) != current_date:
                             self._last_executed[debris_key] = current_date
                             self._create_tracked_task(self._push_debris_info())
                 
@@ -1059,10 +1051,20 @@ class SkyPlugin(Star):
         if not self.push_groups:
             return
         
+        image_url = self._get_daily_task_image_url()
+        
         async def send_to_group(group_id: str):
             try:
+                # [修复] 先发送文本提示
                 await self.context.send_message(group_id, "🌟 光遇今日每日任务")
-                await self.context.send_message(group_id, self._get_daily_task_image_url())
+                
+                # [修复] 使用 CQ 码发送图片，确保平台识别为图片而非文本链接
+                # 如果平台支持 CQ:image，会显示图片；如果不支持，至少会显示链接
+                image_cq = f"[CQ:image,file={image_url}]"
+                await self.context.send_message(group_id, image_cq)
+                
+                # [修复] 添加备用文本链接，防止 CQ 码不被支持时用户看不到内容
+                await self.context.send_message(group_id, f"💡 如果图片未显示，请点击链接查看：{image_url}")
             except Exception as e:
                 logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
         
@@ -1156,7 +1158,7 @@ class SkyPlugin(Star):
 • 光遇切换 <序号> - 切换当前ID
 • 光遇删除 <序号> - 删除绑定的ID
 • 光遇ID列表 - 查看所有绑定的ID
-• 光翼查询 - 查询当前ID的光翼（显示每个地图缺几个）
+• 光翼查询 - 查询当前ID的光翼
 • 光翼查询 <ID> - 查询指定ID的光翼
 • 光翼统计 - 查看全图光翼统计
 
