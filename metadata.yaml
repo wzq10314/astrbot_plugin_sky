@@ -1,11 +1,9 @@
-name: astrbot_plugin_qq_group_daily_analysis # 这是你的插件的唯一识别名。
-display_name: 群分析总结插件 # 插件的显示名称
-desc: "[多平台接入开发中] 群日常分析总结插件 - 支持 QQ (aiocqhttp)、Telegram、Discord；生成精美的群聊分析报告，支持话题分析、用户形象、群聊圣经等功能"  # 插件简短描述
-version: v4.7.15 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: SXP-Simon # 作者
-astrbot_version: ">=4.16.0"
-support_platforms: 
-  - aiocqhttp
-  - discord
-  - telegram
-repo: https://github.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis # 插件的仓库地址
+name: astrbot_plugin_sky
+description: "这是一个为光遇玩家打造的智能助手插件。（移植于Yunzai-bot的Tlon-Sky插件，并加入LLM大模型调用）\n\n无论你是想了解今日任务、查询光翼收集进度，还是想知道服务器排队情况——只需在QQ发送一条消息，即可快速获取光遇游戏相关信息。\n\n支持自然语言交互，直接问\"今天光遇有什么任务？\"，AI 会自动调用相应功能回复你。"
+author: wzq10314
+version: 2.0.0
+support_platforms:
+  - aiocqhttp      # QQ (OneBot)
+  - wecom          # 企业微信
+  - telegram       # Telegram
+repo: https://github.com/wzq10314/astrbot_plugin_sky
