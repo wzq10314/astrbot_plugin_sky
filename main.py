@@ -20,6 +20,14 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api import AstrBotConfig, logger
 import astrbot.api.message_components as Comp
 
+# 尝试导入 croniter，如果没有则使用备用方案
+try:
+    from croniter import croniter
+    CRONITER_AVAILABLE = True
+except ImportError:
+    CRONITER_AVAILABLE = False
+    logger.warning("croniter 未安装，将使用备用定时方案。建议安装: pip install croniter")
+
 
 # 常量定义
 SACRIFICE_INFO_TEXT = """🔥 献祭信息
@@ -70,6 +78,20 @@ class SkyPlugin(Star):
     
     BEIJING_TZ = ZoneInfo("Asia/Shanghai")
     
+    # Cron 表达式配置（兼容 Yunzai-Bot/Tlon-Sky 格式）
+    # 格式: 秒 分 时 日 月 周
+    CRON_SCHEDULES = {
+        "daily_task": "0 0 8 * * *",           # 每天 8:00:00
+        "grandma_8": "0 0 8 * * *",            # 8:00
+        "grandma_10": "0 0 10 * * *",          # 10:00
+        "grandma_12": "0 0 12 * * *",          # 12:00
+        "grandma_16": "0 0 16 * * *",          # 16:00
+        "grandma_18": "0 0 18 * * *",          # 18:00
+        "grandma_20": "0 0 20 * * *",          # 20:00
+        "sacrifice": "0 0 0 * * 6",            # 每周六 00:00:00
+        "debris": "0 0 8 * * *",               # 每天 8:00:00
+    }
+    
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -118,6 +140,9 @@ class SkyPlugin(Star):
         self._active_push_tasks: Set[asyncio.Task] = set()
         self._last_executed: Dict[str, str] = {}
         
+        # Cron 迭代器（如果使用 croniter）
+        self._cron_iters: Dict[str, any] = {}
+        
         logger.info("光遇插件已加载")
     
     def _validate_configs(self):
@@ -133,9 +158,12 @@ class SkyPlugin(Star):
                 hour, minute = map(int, self.daily_task_push_time.split(':'))
                 if not (0 <= hour < 24 and 0 <= minute < 60):
                     raise ValueError
+                # 更新 daily_task 的 cron 表达式
+                self.CRON_SCHEDULES["daily_task"] = f"0 {minute} {hour} * * *"
+                self.CRON_SCHEDULES["debris"] = f"0 {minute} {hour} * * *"
             except (ValueError, AttributeError):
-                logger.error(f"❌ daily_task_push_time 格式错误: {self.daily_task_push_time}，应为 HH:MM 格式，已禁用每日推送")
-                self.enable_daily_task_push = False
+                logger.error(f"❌ daily_task_push_time 格式错误: {self.daily_task_push_time}，应为 HH:MM 格式，已使用默认 08:00")
+                self.daily_task_push_time = "08:00"
     
     def _get_user_lock(self, user_id: str) -> asyncio.Lock:
         """获取用户级锁，防止并发修改同一用户数据"""
@@ -154,6 +182,7 @@ class SkyPlugin(Star):
             self.enable_sacrifice_reminder or self.enable_debris_reminder):
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
             logger.info("光遇定时任务调度器已启动")
+            logger.info(f"当前 Cron 配置: {self.CRON_SCHEDULES}")
     
     async def terminate(self):
         """插件关闭时自动调用"""
@@ -192,15 +221,6 @@ class SkyPlugin(Star):
         
         task.add_done_callback(cleanup)
         return task
-    
-    def _cleanup_last_executed(self, current_date: str):
-        """清理非当天的执行记录"""
-        keys_to_remove = [
-            key for key in self._last_executed.keys() 
-            if not key.endswith(f"_{current_date}")
-        ]
-        for key in keys_to_remove:
-            del self._last_executed[key]
     
     def _build_unified_msg_origin(self, group_id: str) -> str:
         """构造统一消息来源标识符"""
@@ -681,27 +701,40 @@ class SkyPlugin(Star):
         
         return title, image_data
     
-    # ==================== LLM工具函数 ====================
+    # ==================== LLM工具函数（已优化描述和命名）====================
     
-    @filter.llm_tool(name="get_sky_daily_tasks")
+    @filter.llm_tool(name="get_daily_task_image")
     async def tool_get_daily_tasks(self, event: AstrMessageEvent):
-        """获取光遇今日每日任务图片"""
+        """
+        获取光遇今日每日任务攻略图片。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "今天每日任务是什么"、"今日任务"、"查看今天的任务"
+        - "每日任务图片"、"任务攻略"、"今天的每日任务"
+        - "光遇今日任务"、"今天要做哪些任务"
+        """
         title, image_data = await self._handle_image_query("daily_task")
         
         if image_data is None:
             yield event.plain_result(title)
             return
         
-        # 使用 chain_result 发送图片
         chain = [
             Comp.Plain(title),
             Comp.Image.fromBytes(image_data)
         ]
         yield event.chain_result(chain)
     
-    @filter.llm_tool(name="get_sky_season_candles")
+    @filter.llm_tool(name="get_season_candles_location")
     async def tool_get_season_candles(self, event: AstrMessageEvent):
-        """获取光遇季节蜡烛位置图片"""
+        """
+        获取光遇今日季节蜡烛位置图片。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "季节蜡烛在哪"、"季蜡位置"、"今天季节蜡烛"
+        - "季节蜡烛图片"、"查看季节蜡烛位置"
+        - "光遇季蜡"、"季节蜡烛刷新点"
+        """
         title, image_data = await self._handle_image_query("season_candle")
         
         if image_data is None:
@@ -714,9 +747,16 @@ class SkyPlugin(Star):
         ]
         yield event.chain_result(chain)
     
-    @filter.llm_tool(name="get_sky_big_candles")
+    @filter.llm_tool(name="get_big_candles_location")
     async def tool_get_big_candles(self, event: AstrMessageEvent):
-        """获取光遇大蜡烛位置图片"""
+        """
+        获取光遇今日大蜡烛位置图片。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "大蜡烛在哪"、"今天大蜡烛位置"、"大蜡烛图片"
+        - "查看大蜡烛"、"光遇大蜡烛"、"大蜡烛刷新点"
+        - "今天哪些图有大蜡烛"、"全图大蜡烛位置"
+        """
         title, image_data = await self._handle_image_query("big_candle")
         
         if image_data is None:
@@ -729,9 +769,15 @@ class SkyPlugin(Star):
         ]
         yield event.chain_result(chain)
     
-    @filter.llm_tool(name="get_sky_free_magic")
+    @filter.llm_tool(name="get_free_magic_today")
     async def tool_get_free_magic(self, event: AstrMessageEvent):
-        """获取光遇免费魔法图片"""
+        """
+        获取光遇今日免费魔法领取信息图片。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "今天免费魔法是什么"、"今日魔法"、"免费魔法"
+        - "领取魔法"、"今天可以领什么魔法"、"魔法商店"
+        """
         title, image_data = await self._handle_image_query("magic")
         
         if image_data is None:
@@ -744,50 +790,94 @@ class SkyPlugin(Star):
         ]
         yield event.chain_result(chain)
     
-    @filter.llm_tool(name="get_sky_season_progress")
+    @filter.llm_tool(name="get_season_progress")
     async def tool_get_season_progress(self, event: AstrMessageEvent):
-        """获取当前季节进度信息"""
+        """
+        获取当前季节进度、剩余天数和毕业所需蜡烛信息。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "当前季节进度"、"季节还剩多少天"、"本赛季信息"
+        - "毕业需要多少蜡烛"、"季节什么时候结束"
+        - "现在是什么季节"、"查看季节时间"
+        """
         data = await self._get_season_progress_data()
         result = self._format_season_result(data)
         yield event.plain_result(result)
     
-    @filter.llm_tool(name="get_sky_debris_info")
+    @filter.llm_tool(name="get_today_debris_info")
     async def tool_get_debris_info(self, event: AstrMessageEvent):
-        """获取今日碎石信息"""
+        """
+        获取今日碎石（黑石/红石）坠落位置和类型信息。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "今天碎石在哪"、"碎石位置"、"黑石在哪"、"红石在哪"
+        - "今日碎石"、"查看碎石"、"碎石坠落地点"
+        - "今天有没有碎石"、"碎石在哪个图"
+        """
         data = await self._get_debris_info_data()
         result = self._format_debris_result(data)
         yield event.plain_result(result)
     
-    @filter.llm_tool(name="get_sky_traveling_spirit")
+    @filter.llm_tool(name="get_traveling_spirit_info")
     async def tool_get_traveling_spirit(self, event: AstrMessageEvent):
-        """获取复刻先祖信息"""
+        """
+        获取当前复刻先祖（旅行先祖）信息。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "当前复刻先祖是谁"、"这周四复刻"、"本周复刻"
+        - "复刻先祖信息"、"现在复刻的是什么"、"旅行先祖"
+        """
         data = await self._get_traveling_spirit_data()
         result = self._format_traveling_spirit_result(data)
         yield event.plain_result(result)
     
-    @filter.llm_tool(name="get_sky_sacrifice_info")
+    @filter.llm_tool(name="get_sacrifice_guide")
     async def tool_get_sacrifice_info(self, event: AstrMessageEvent):
-        """获取献祭相关信息"""
+        """
+        获取献祭（伊甸之眼）相关信息指南。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "献祭信息"、"伊甸之眼"、"升华蜡烛怎么获得"
+        - "献祭刷新时间"、"暴风眼攻略"、"每周献祭"
+        """
         yield event.plain_result(SACRIFICE_INFO_TEXT)
     
-    @filter.llm_tool(name="get_sky_grandma_schedule")
+    @filter.llm_tool(name="get_grandma_dinner_time")
     async def tool_get_grandma_schedule(self, event: AstrMessageEvent):
-        """获取老奶奶用餐时间表"""
+        """
+        获取雨林老奶奶用餐时间和挂机烛火信息。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "老奶奶时间"、"奶奶吃饭时间"、"雨林老奶奶"
+        - "挂机收烛火"、"老奶奶开饭时间"、"用餐时间"
+        """
         yield event.plain_result(GRANDMA_SCHEDULE_TEXT)
     
-    # [修改] 重命名原工具：获取全图光翼总数统计（静态数据）
-    @filter.llm_tool(name="get_sky_wing_total_count")
+    @filter.llm_tool(name="get_total_wings_count")
     async def tool_get_wing_total_count(self, event: AstrMessageEvent):
-        """获取光遇全图光翼的总数统计（静态数据，所有玩家通用）"""
+        """
+        获取光遇全图光翼的总数统计（静态数据，所有玩家通用）。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "光翼总数"、"全图多少光翼"、"最多多少光翼"
+        - "各图光翼数量"、"光翼统计"、"全图光翼分布"
+        """
         data = await self._get_wing_count_data()
         result = self._format_wing_count_result(data)
         yield event.plain_result(result)
     
-    # [新增] 查询个人光翼进度（与命令行"光翼查询"逻辑一致）
-    @filter.llm_tool(name="query_user_wings")
+    @filter.llm_tool(name="query_personal_wings_progress")
     async def tool_query_user_wings(self, event: AstrMessageEvent, sky_id: Optional[str] = None):
-        """查询用户个人的光翼收集进度，包括每个地图已收集和未收集的详细统计"""
-        # 检查 API key
+        """
+        查询用户个人的光翼收集进度，包括每个地图已收集和未收集的详细统计。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "我有多少光翼"、"查询我的光翼"、"我的光翼进度"
+        - "我还差多少光翼"、"光翼收集情况"、"查看我的翅膀"
+        
+        参数说明:
+            sky_id: 可选的光遇游戏短ID（数字）。如不提供且用户已绑定ID，则自动查询绑定ID；如未绑定会提示先绑定。
+        """
         if not self.wing_query_key:
             yield event.plain_result("❌ 管理员未配置 wing_query_key，请联系管理员配置光翼查询API密钥")
             return
@@ -859,9 +949,15 @@ class SkyPlugin(Star):
         
         yield event.plain_result(result)
     
-    @filter.llm_tool(name="get_sky_server_status")
+    @filter.llm_tool(name="get_server_queue_status")
     async def tool_get_server_status(self, event: AstrMessageEvent):
-        """获取光遇服务器状态"""
+        """
+        获取光遇服务器当前排队状态和等待时间。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "服务器状态"、"光遇排队"、"服务器排队"
+        - "现在需要排队吗"、"服务器炸了吗"、"排队多久"
+        """
         data = await self._get_server_status_data()
         result = self._format_server_status_result(data)
         yield event.plain_result(result)
@@ -1098,7 +1194,6 @@ class SkyPlugin(Star):
             yield event.plain_result(title)
             return
         
-        # 使用 chain_result 发送图片
         chain = [
             Comp.Plain(title),
             Comp.Image.fromBytes(image_data)
@@ -1188,85 +1283,160 @@ class SkyPlugin(Star):
         result = self._format_server_status_result(data)
         yield event.plain_result(result)
     
-    # ==================== 定时任务 ====================
+    # ==================== 定时任务（修复版）====================
     
     async def _scheduler_loop(self):
-        """定时任务调度器"""
-        last_date = None
+        """定时任务调度器 - 使用 Cron 表达式精确触发"""
+        logger.info("定时任务调度器启动")
+        
+        # 初始化 cron 迭代器
+        if CRONITER_AVAILABLE:
+            self._cron_iters = {}
+            base_time = self._get_beijing_time()
+            
+            for task_name, cron_expr in self.CRON_SCHEDULES.items():
+                # 检查任务是否启用
+                if task_name.startswith("grandma") and not self.enable_grandma_reminder:
+                    continue
+                if task_name == "sacrifice" and not self.enable_sacrifice_reminder:
+                    continue
+                if task_name == "debris" and not self.enable_debris_reminder:
+                    continue
+                if task_name == "daily_task" and not self.enable_daily_task_push:
+                    continue
+                
+                try:
+                    itr = croniter(cron_expr, base_time)
+                    self._cron_iters[task_name] = itr
+                    next_time = itr.get_next(datetime)
+                    logger.info(f"[Cron] {task_name}: {cron_expr} -> 下次执行: {next_time}")
+                except Exception as e:
+                    logger.error(f"[Cron] 初始化 {task_name} 失败: {e}")
+            
+            # 使用 croniter 的调度循环
+            await self._croniter_loop()
+        else:
+            # 备用方案：使用精确的时间检查
+            logger.info("使用备用定时方案（建议安装 croniter: pip install croniter）")
+            await self._backup_scheduler_loop()
+    
+    async def _croniter_loop(self):
+        """使用 croniter 的精确调度循环"""
+        while self._running:
+            try:
+                now = self._get_beijing_time()
+                
+                for task_name, itr in list(self._cron_iters.items()):
+                    next_time = itr.get_next(datetime)
+                    
+                    # 检查是否应该执行（当前时间 >= 下次执行时间）
+                    if now >= next_time:
+                        # 再次获取下一个时间点，确保是当前的执行点
+                        itr = croniter(self.CRON_SCHEDULES[task_name], now)
+                        self._cron_iters[task_name] = itr
+                        
+                        # 检查是否已经执行过（使用分钟级精度去重）
+                        exec_key = f"{task_name}_{now.strftime('%Y-%m-%d_%H:%M')}"
+                        if exec_key not in self._last_executed:
+                            self._last_executed[exec_key] = now.strftime('%Y-%m-%d')
+                            logger.info(f"[定时任务触发] {task_name} at {now}")
+                            
+                            # 执行对应任务
+                            if task_name == "daily_task":
+                                self._create_tracked_task(self._push_daily_tasks())
+                            elif task_name.startswith("grandma"):
+                                self._create_tracked_task(self._push_grandma_reminder())
+                            elif task_name == "sacrifice":
+                                self._create_tracked_task(self._push_sacrifice_reminder())
+                            elif task_name == "debris":
+                                self._create_tracked_task(self._push_debris_info())
+                
+                # 睡眠到下一秒，精确检查
+                await asyncio.sleep(1)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[Cron] 调度循环出错: {e}")
+                await asyncio.sleep(5)
+    
+    async def _backup_scheduler_loop(self):
+        """备用调度方案（不使用 croniter）- 精确到秒级检查"""
+        logger.info("备用调度器启动")
+        
+        # 记录上次执行的时间戳（精确到秒）
+        last_executed_seconds = {}
         
         while self._running:
             try:
                 now = self._get_beijing_time()
+                current_time_key = now.strftime("%Y-%m-%d_%H:%M:%S")
                 current_date = now.strftime("%Y-%m-%d")
-                current_minute = now.minute
-                current_hour = now.hour
                 
-                # 日期变化时清理过期记录
-                if last_date != current_date:
-                    if last_date is not None:
-                        self._cleanup_last_executed(current_date)
-                    last_date = current_date
-                
-                # 每日任务推送
-                if self.enable_daily_task_push:
-                    task_key = f"daily_task_{current_date}"
-                    target_hour, target_min = map(int, self.daily_task_push_time.split(':'))
-                    
-                    is_time_reached = (current_hour > target_hour or 
-                                      (current_hour == target_hour and current_minute >= target_min))
-                    
-                    if is_time_reached and self._last_executed.get(task_key) != current_date:
-                        self._last_executed[task_key] = current_date
-                        self._create_tracked_task(self._push_daily_tasks())
-                
-                # 老奶奶提醒（整点后1分钟内都算）
+                # ===== 老奶奶提醒 =====
                 if self.enable_grandma_reminder:
-                    if current_hour in [8, 10, 12, 16, 18, 20]:
-                        grandma_key = f"grandma_{current_date}_{current_hour}"
-                        if current_minute <= 1 and self._last_executed.get(grandma_key) != current_date:
-                            self._last_executed[grandma_key] = current_date
+                    if now.hour in [8, 10, 12, 16, 18, 20] and now.minute == 0 and now.second == 0:
+                        key = f"grandma_{current_time_key}"
+                        if key not in last_executed_seconds:
+                            last_executed_seconds[key] = True
+                            logger.info(f"[定时任务触发] 老奶奶提醒 at {now}")
                             self._create_tracked_task(self._push_grandma_reminder())
                 
-                # 献祭刷新提醒（周六00:00-00:01）
+                # ===== 献祭提醒 =====
                 if self.enable_sacrifice_reminder:
-                    if now.weekday() == 5 and current_hour == 0:
-                        sacrifice_key = f"sacrifice_{current_date}"
-                        if current_minute <= 1 and self._last_executed.get(sacrifice_key) != current_date:
-                            self._last_executed[sacrifice_key] = current_date
+                    if now.weekday() == 5 and now.hour == 0 and now.minute == 0 and now.second == 0:
+                        key = f"sacrifice_{current_time_key}"
+                        if key not in last_executed_seconds:
+                            last_executed_seconds[key] = True
+                            logger.info(f"[定时任务触发] 献祭提醒 at {now}")
                             self._create_tracked_task(self._push_sacrifice_reminder())
                 
-                # 碎石提醒（每天08:00-08:01）
+                # ===== 碎石提醒 =====
                 if self.enable_debris_reminder:
-                    if current_hour == 8:
-                        debris_key = f"debris_{current_date}"
-                        if current_minute <= 1 and self._last_executed.get(debris_key) != current_date:
-                            self._last_executed[debris_key] = current_date
-                            self._create_tracked_task(self._push_debris_info())
+                    target_hour, target_min = map(int, self.daily_task_push_time.split(':'))
+                    if now.hour == target_hour and now.minute == target_min and now.second == 0:
+                        key = f"debris_{current_time_key}"
+                        if key not in last_executed_seconds:
+                            last_executed_seconds[key] = True
+                            logger.info(f"[定时任务触发] 碎石提醒 at {now}")
+                        self._create_tracked_task(self._push_debris_info())
                 
-                # 修正睡眠时间计算，避免 59.9 秒死循环
-                now = self._get_beijing_time()
-                sleep_seconds = 60.1 - (now.second + now.microsecond / 1_000_000.0)
-                if sleep_seconds < 0.1:
-                    sleep_seconds = 60.1
-                await asyncio.sleep(sleep_seconds)
+                # ===== 每日任务推送 =====
+                if self.enable_daily_task_push:
+                    target_hour, target_min = map(int, self.daily_task_push_time.split(':'))
+                    if now.hour == target_hour and now.minute == target_min and now.second == 0:
+                        key = f"daily_task_{current_time_key}"
+                        if key not in last_executed_seconds:
+                            last_executed_seconds[key] = True
+                            logger.info(f"[定时任务触发] 每日任务 at {now}")
+                            self._create_tracked_task(self._push_daily_tasks())
+                
+                # 清理旧记录（每小时整点清理）
+                if now.minute == 0 and now.second == 0:
+                    cutoff = now.strftime("%Y-%m-%d_%H")
+                    last_executed_seconds = {
+                        k: v for k, v in last_executed_seconds.items() 
+                        if k.startswith(cutoff[:13])  # 保留当前小时的数据
+                    }
+                
+                # 精确睡眠到下一秒
+                await asyncio.sleep(1)
+                
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"定时任务出错: {e}")
-                now = self._get_beijing_time()
-                sleep_seconds = 60.1 - (now.second + now.microsecond / 1_000_000.0)
-                if sleep_seconds < 0.1:
-                    sleep_seconds = 1
-                await asyncio.sleep(sleep_seconds)
+                logger.error(f"[Backup] 调度循环出错: {e}")
+                await asyncio.sleep(5)
     
     async def _push_daily_tasks(self):
         """推送每日任务 - 下载图片后发送，避免 URL 泄露 key"""
         if not self.push_groups:
+            logger.warning("[推送] 未配置 push_groups，跳过每日任务推送")
             return
         
         # 检查 API key
         if not self.sky_api_key:
-            logger.error("sky_api_key 未配置，无法推送每日任务")
+            logger.error("[推送] sky_api_key 未配置，无法推送每日任务")
             return
         
         # 下载图片到内存
@@ -1274,8 +1444,10 @@ class SkyPlugin(Star):
         image_data = await self._download_image(image_url)
         
         if image_data is None:
-            logger.error("每日任务图片下载失败，取消推送")
+            logger.error("[推送] 每日任务图片下载失败，取消推送")
             return
+        
+        logger.info(f"[推送] 开始发送每日任务到 {len(self.push_groups)} 个群组")
         
         async def send_to_group(group_id: str):
             try:
@@ -1288,8 +1460,9 @@ class SkyPlugin(Star):
                     Comp.Image.fromBytes(image_data)  # 使用 fromBytes 发送内存中的图片
                 ]
                 await self.context.send_message(unified_msg_origin, chain)
+                logger.info(f"[推送] 每日任务已发送到群组 {group_id}")
             except Exception as e:
-                logger.error(f"推送每日任务到群组 {group_id} 失败: {e}")
+                logger.error(f"[推送] 推送每日任务到群组 {group_id} 失败: {e}")
                 # 降级时也不发送包含 key 的 URL ，只发送文字提示
                 try:
                     unified_msg_origin = self._build_unified_msg_origin(group_id)
@@ -1298,14 +1471,16 @@ class SkyPlugin(Star):
                         "🌟 光遇今日每日任务\n\n⚠️ 图片发送失败，请使用「每日任务」命令手动查询"
                     )
                 except Exception as e2:
-                    logger.error(f"降级发送也失败: {e2}")
+                    logger.error(f"[推送] 降级发送也失败: {e2}")
         
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("[推送] 每日任务推送完成")
     
     async def _push_grandma_reminder(self):
         """推送老奶奶用餐提醒"""
         if not self.push_groups:
+            logger.warning("[推送] 未配置 push_groups，跳老奶奶提醒")
             return
         
         message = "🍲 老奶奶开饭啦！\n\n"
@@ -1313,57 +1488,72 @@ class SkyPlugin(Star):
         message += "⏰ 用餐时间约30分钟\n"
         message += "💡 带上火盆或火把可以自动收集烛火哦~"
         
+        logger.info(f"[推送] 开始发送老奶奶提醒到 {len(self.push_groups)} 个群组")
+        
         async def send_to_group(group_id: str):
             try:
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 await self.context.send_message(unified_msg_origin, message)
+                logger.info(f"[推送] 老奶奶提醒已发送到群组 {group_id}")
             except Exception as e:
-                logger.error(f"推送老奶奶提醒到群组 {group_id} 失败: {e}")
+                logger.error(f"[推送] 推送老奶奶提醒到群组 {group_id} 失败: {e}")
         
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("[推送] 老奶奶提醒推送完成")
     
     async def _push_sacrifice_reminder(self):
         """推送献祭刷新提醒"""
         if not self.push_groups:
+            logger.warning("[推送] 未配置 push_groups，跳过献祭提醒")
             return
         
         message = "🔥 献祭已刷新！\n\n"
         message += "📅 每周六凌晨00:00刷新\n"
         message += "💡 记得去暴风眼献祭获取升华蜡烛~"
         
+        logger.info(f"[推送] 开始发送献祭提醒到 {len(self.push_groups)} 个群组")
+        
         async def send_to_group(group_id: str):
             try:
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 await self.context.send_message(unified_msg_origin, message)
+                logger.info(f"[推送] 献祭提醒已发送到群组 {group_id}")
             except Exception as e:
-                logger.error(f"推送献祭提醒到群组 {group_id} 失败: {e}")
+                logger.error(f"[推送] 推送献祭提醒到群组 {group_id} 失败: {e}")
         
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("[推送] 献祭提醒推送完成")
     
     async def _push_debris_info(self):
         """推送碎石信息"""
         if not self.push_groups:
+            logger.warning("[推送] 未配置 push_groups，跳过碎石提醒")
             return
         
         data = await self._get_debris_info_data()
         if not data.get("has_debris"):
+            logger.info("[推送] 今日无碎石，跳过推送")
             return
         
         message = f"💎 今日碎石信息\n\n"
         message += f"📍 地图: {data['map_name']}\n"
         message += "💡 完成碎石任务可以获得升华蜡烛奖励~"
         
+        logger.info(f"[推送] 开始发送碎石信息到 {len(self.push_groups)} 个群组")
+        
         async def send_to_group(group_id: str):
             try:
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
                 await self.context.send_message(unified_msg_origin, message)
+                logger.info(f"[推送] 碎石信息已发送到群组 {group_id}")
             except Exception as e:
-                logger.error(f"推送碎石信息到群组 {group_id} 失败: {e}")
+                logger.error(f"[推送] 推送碎石信息到群组 {group_id} 失败: {e}")
         
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("[推送] 碎石信息推送完成")
     
     # ==================== 菜单命令 ====================
     
