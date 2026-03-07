@@ -399,33 +399,37 @@ class SkyPlugin(Star):
     # ==================== 核心逻辑方法 ====================
     
     async def _get_debris_info_data(self) -> Dict:
-        """获取碎石信息数据"""
+        """获取碎石信息数据 - 本地计算方案（基于国服规律）"""
         now = self._get_beijing_time()
         day = now.day
         day_of_week = now.weekday()
         
         is_first_half = day <= 15
-        valid_days = [2, 6, 0] if is_first_half else [3, 5, 0]
+        # 国服碎石规律：上半月周二/周六/周日，下半月周三/周五/周日
+        # weekday: 周一=0, 周二=1, 周三=2, 周四=3, 周五=4, 周六=5, 周日=6
+        valid_days = [1, 5, 6] if is_first_half else [2, 4, 6]
         
         if day_of_week not in valid_days:
             return {"has_debris": False}
         
+        # 碎石地图轮换规律（基于日期）
         maps = ["暮土", "禁阁", "云野", "雨林", "霞谷"]
         map_name = maps[(day - 1) % len(maps)]
         
-        if day_of_week == 0:
-            debris_type = "红石" if is_first_half else "黑石"
-        elif day_of_week in [2, 3]:
-            debris_type = "黑石"
-        else:
+        # 碎石类型：周一到周四=黑石，周五/周六/周日=红石
+        # weekday: 周一=0, 周二=1, 周三=2, 周四=3, 周五=4, 周六=5, 周日=6
+        if day_of_week in [4, 5, 6]:  # 周五、周六、周日
             debris_type = "红石"
+        else:  # 周一到周四
+            debris_type = "黑石"
         
+        # 各地图不同日期的具体位置 (key 是 weekday)
         locations = {
-            "云野": {2: "蝴蝶平原", 3: "仙乡", 5: "云顶浮石", 6: "幽光山洞", 0: "圣岛"},
-            "雨林": {2: "荧光森林", 3: "密林遗迹", 5: "大树屋", 6: "雨林神殿", 0: "秘密花园"},
-            "霞谷": {2: "滑冰场", 3: "滑冰场", 5: "圆梦村", 6: "圆梦村", 0: "雪隐峰"},
-            "暮土": {2: "边陲荒漠", 3: "远古战场", 5: "黑水港湾", 6: "巨兽荒原", 0: "失落方舟"},
-            "禁阁": {2: "星光沙漠", 3: "星光沙漠", 5: "星光沙漠·一隅", 6: "星光沙漠·一隅", 0: "星光沙漠·一隅"}
+            "云野": {1: "蝴蝶平原", 2: "仙乡", 4: "云顶浮石", 5: "幽光山洞", 6: "圣岛"},
+            "雨林": {1: "荧光森林", 2: "密林遗迹", 4: "大树屋", 5: "雨林神殿", 6: "秘密花园"},
+            "霞谷": {1: "滑冰场", 2: "滑冰场", 4: "圆梦村", 5: "圆梦村", 6: "雪隐峰"},
+            "暮土": {1: "边陲荒漠", 2: "远古战场", 4: "黑水港湾", 5: "巨兽荒原", 6: "失落方舟"},
+            "禁阁": {1: "星光沙漠", 2: "星光沙漠", 4: "星光沙漠·一隅", 5: "星光沙漠·一隅", 6: "星光沙漠·一隅"}
         }
         
         location = locations.get(map_name, {}).get(day_of_week, "未知位置")
@@ -434,7 +438,8 @@ class SkyPlugin(Star):
             "has_debris": True,
             "map_name": map_name,
             "location": location,
-            "debris_type": debris_type
+            "debris_type": debris_type,
+            "times": ["10:08", "14:08", "22:08"]  # 国服标准时间
         }
     
     def _format_debris_result(self, data: Dict) -> str:
@@ -446,12 +451,99 @@ class SkyPlugin(Star):
         result += f"📍 地图: {data['map_name']}\n"
         result += f"📍 位置: {data['location']}\n"
         result += f"🔷 类型: {data['debris_type']}\n\n"
-        result += f"⏰ 坠落时间:\n"
-        result += f"   • 07:08 (持续约50分钟)\n"
-        result += f"   • 13:08 (持续约50分钟)\n"
-        result += f"   • 19:08 (持续约50分钟)\n\n"
+        
+        # 使用 API 返回的时间
+        times = data.get("times", [])
+        if times:
+            result += f"⏰ 坠落时间:\n"
+            for t in times:
+                result += f"   • {t}\n"
+            result += "\n"
+        else:
+            # 默认时间（备用）
+            result += f"⏰ 坠落时间:\n"
+            result += f"   • 10:08 (持续约50分钟)\n"
+            result += f"   • 14:08 (持续约50分钟)\n"
+            result += f"   • 22:08 (持续约50分钟)\n\n"
+        
         result += f"🎁 奖励: 升华蜡烛\n"
         result += f"💡 完成碎石任务可以获得升华蜡烛奖励"
+        
+        # 如果有路线图链接
+        route_url = data.get("route_url")
+        if route_url:
+            result += f"\n\n🗺️ 查看路线: {route_url}"
+        
+        return result
+    
+    def _get_month_debris_data(self, year: int, month: int) -> List[Dict]:
+        """获取指定月份的碎石信息列表"""
+        import calendar
+        
+        # 获取该月天数
+        _, days_in_month = calendar.monthrange(year, month)
+        
+        debris_list = []
+        for day in range(1, days_in_month + 1):
+            date = datetime(year, month, day)
+            day_of_week = date.weekday()
+            is_first_half = day <= 15
+            
+            # 判断是否有碎石：上半月周二/周六/周日，下半月周三/周五/周日
+            valid_days = [1, 5, 6] if is_first_half else [2, 4, 6]
+            
+            if day_of_week not in valid_days:
+                continue
+            
+            # 计算碎石信息
+            maps = ["暮土", "禁阁", "云野", "雨林", "霞谷"]
+            map_name = maps[(day - 1) % len(maps)]
+            
+            # 碎石类型：周一到周四=黑石，周五/周六/周日=红石
+            if day_of_week in [4, 5, 6]:
+                debris_type = "红石"
+            else:
+                debris_type = "黑石"
+            
+            locations = {
+                "云野": {1: "蝴蝶平原", 2: "仙乡", 4: "云顶浮石", 5: "幽光山洞", 6: "圣岛"},
+                "雨林": {1: "荧光森林", 2: "密林遗迹", 4: "大树屋", 5: "雨林神殿", 6: "秘密花园"},
+                "霞谷": {1: "滑冰场", 2: "滑冰场", 4: "圆梦村", 5: "圆梦村", 6: "雪隐峰"},
+                "暮土": {1: "边陲荒漠", 2: "远古战场", 4: "黑水港湾", 5: "巨兽荒原", 6: "失落方舟"},
+                "禁阁": {1: "星光沙漠", 2: "星光沙漠", 4: "星光沙漠·一隅", 5: "星光沙漠·一隅", 6: "星光沙漠·一隅"}
+            }
+            
+            location = locations.get(map_name, {}).get(day_of_week, "未知位置")
+            
+            debris_list.append({
+                "date": date.strftime("%m月%d日"),
+                "weekday": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][day_of_week],
+                "map_name": map_name,
+                "location": location,
+                "debris_type": debris_type
+            })
+        
+        return debris_list
+    
+    def _format_month_debris_result(self, year: int, month: int, debris_list: List[Dict]) -> str:
+        """格式化整月碎石信息"""
+        result = f"💎 {year}年{month}月碎石日历\n\n"
+        
+        if not debris_list:
+            result += "本月无碎石数据"
+            return result
+        
+        # 按日期排序
+        debris_list.sort(key=lambda x: x["date"])
+        
+        for debris in debris_list:
+            icon = "⚫" if debris["debris_type"] == "黑石" else "🔴"
+            result += f"{icon} {debris['date']} ({debris['weekday']})\n"
+            result += f"   {debris['map_name']} - {debris['location']} ({debris['debris_type']})\n\n"
+        
+        result += "⏰ 坠落时间: 10:08 / 14:08 / 22:08\n"
+        result += "💡 黑石奖励烛火，红石奖励升华蜡烛"
+        
         return result
     
     async def _get_season_progress_data(self) -> Optional[Dict]:
@@ -814,6 +906,31 @@ class SkyPlugin(Star):
         """
         data = await self._get_debris_info_data()
         result = self._format_debris_result(data)
+        yield event.plain_result(result)
+    
+    @filter.llm_tool(name="get_month_debris_calendar")
+    async def tool_get_month_debris(self, event: AstrMessageEvent, month: Optional[int] = None):
+        """
+        获取指定月份的碎石日历，显示整月的碎石安排。
+        
+        当用户询问以下内容时必须调用此工具：
+        - "这个月碎石安排"、"整月碎石"、"碎石日历"
+        - "这月有哪些碎石"、"查看月历"、"月度碎石"
+        - "什么时候有红石"、"什么时候有黑石"
+        
+        参数说明:
+            month: 月份（1-12），不传则使用当前月份
+        """
+        now = self._get_beijing_time()
+        year = now.year
+        query_month = month if month else now.month
+        
+        if query_month < 1 or query_month > 12:
+            yield event.plain_result("❌ 月份必须在 1-12 之间")
+            return
+        
+        debris_list = self._get_month_debris_data(year, query_month)
+        result = self._format_month_debris_result(year, query_month, debris_list)
         yield event.plain_result(result)
     
     @filter.llm_tool(name="get_traveling_spirit_info")
@@ -1257,6 +1374,24 @@ class SkyPlugin(Star):
         result = self._format_debris_result(data)
         yield event.plain_result(result)
     
+    @filter.command("碎石日历")
+    async def month_debris(self, event: AstrMessageEvent, month: int = 0):
+        """获取整月碎石日历
+        用法: 碎石日历 [月份]
+        示例: 碎石日历 或 碎石日历 3
+        """
+        now = self._get_beijing_time()
+        year = now.year
+        query_month = month if month > 0 else now.month
+        
+        if query_month < 1 or query_month > 12:
+            yield event.plain_result("❌ 月份必须在 1-12 之间")
+            return
+        
+        debris_list = self._get_month_debris_data(year, query_month)
+        result = self._format_month_debris_result(year, query_month, debris_list)
+        yield event.plain_result(result)
+    
     @filter.command("复刻先祖")
     async def traveling_spirit(self, event: AstrMessageEvent):
         """获取复刻先祖信息"""
@@ -1320,18 +1455,23 @@ class SkyPlugin(Star):
     
     async def _croniter_loop(self):
         """使用 croniter 的精确调度循环"""
+        # 初始化每个任务的下次执行时间
+        next_exec_times = {}
+        for task_name, itr in self._cron_iters.items():
+            next_exec_times[task_name] = itr.get_next(datetime)
+            logger.info(f"[Cron] {task_name} 下次执行: {next_exec_times[task_name]}")
+        
         while self._running:
             try:
                 now = self._get_beijing_time()
                 
                 for task_name, itr in list(self._cron_iters.items()):
-                    next_time = itr.get_next(datetime)
+                    next_time = next_exec_times.get(task_name)
                     
-                    # 检查是否应该执行（当前时间 >= 下次执行时间）
-                    if now >= next_time:
-                        # 再次获取下一个时间点，确保是当前的执行点
-                        itr = croniter(self.CRON_SCHEDULES[task_name], now)
-                        self._cron_iters[task_name] = itr
+                    if next_time and now >= next_time:
+                        # 更新下次执行时间
+                        next_exec_times[task_name] = itr.get_next(datetime)
+                        logger.info(f"[Cron] {task_name} 下次执行时间更新为: {next_exec_times[task_name]}")
                         
                         # 检查是否已经执行过（使用分钟级精度去重）
                         exec_key = f"{task_name}_{now.strftime('%Y-%m-%d_%H:%M')}"
@@ -1371,9 +1511,9 @@ class SkyPlugin(Star):
                 current_time_key = now.strftime("%Y-%m-%d_%H:%M:%S")
                 current_date = now.strftime("%Y-%m-%d")
                 
-                # ===== 老奶奶提醒 =====
+                # ===== 老奶奶提醒（提前5分钟：7:55, 9:55, 11:55, 15:55, 17:55, 19:55） =====
                 if self.enable_grandma_reminder:
-                    if now.hour in [8, 10, 12, 16, 18, 20] and now.minute == 0 and now.second == 0:
+                    if now.hour in [7, 9, 11, 15, 17, 19] and now.minute == 55 and now.second == 0:
                         key = f"grandma_{current_time_key}"
                         if key not in last_executed_seconds:
                             last_executed_seconds[key] = True
@@ -1541,9 +1681,9 @@ class SkyPlugin(Star):
             message += f"📍 位置: {data['location']}\n"
             message += f"🔷 类型: {data['debris_type']}\n\n"
             message += f"⏰ 坠落时间:\n"
-            message += f"   • 07:08 (持续约50分钟)\n"
-            message += f"   • 13:08 (持续约50分钟)\n"
-            message += f"   • 19:08 (持续约50分钟)\n\n"
+            message += f"   • 10:08 (持续约50分钟)\n"
+            message += f"   • 14:08 (持续约50分钟)\n"
+            message += f"   • 22:08 (持续约50分钟)\n\n"
             message += f"🎁 奖励: 升华蜡烛\n"
             message += f"💡 完成碎石任务可以获得升华蜡烛奖励~"
         
@@ -1575,6 +1715,7 @@ class SkyPlugin(Star):
 • 免费魔法 - 获取今日免费魔法图片
 • 季节进度 - 查看当前季节进度
 • 碎石信息 - 查看今日碎石信息
+• 碎石日历 [月份] - 查看整月碎石安排
 • 复刻先祖 - 查看当前复刻先祖
 • 献祭信息 - 查看献祭相关信息
 • 老奶奶时间 - 查看老奶奶用餐时间
