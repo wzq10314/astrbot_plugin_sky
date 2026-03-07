@@ -267,7 +267,7 @@ astrbot_plugin_sky/
 
 ## 📝 更新日志
 
-### v1.1.0
+### v2.5.0
 - ✨ 新增身高查询功能
 - ✨ 支持绑定多个光遇账号
 - ✨ 支持为账号设置备注名
@@ -287,7 +287,7 @@ astrbot_plugin_sky/
 ## 🙏 致谢
 
 - [**Tlon-Sky**](https://gitee.com/Tloml-Starry/Tlon-Sky) — 本插件功能原型来源，感谢原作者 [**Tloml-Starry**](https://gitee.com/Tloml-Starry) 的杰出贡献
-- [**AstrBot**](https://github.com/Soulter/AstrBot) — 跨平台聊天机器人框架
+- [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) — 跨平台聊天机器人框架
 - 光遇数据 API 由社区提供支持
 
 ---
