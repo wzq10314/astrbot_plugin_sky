@@ -1391,7 +1391,26 @@ class SkyPlugin(Star):
         debris_list = self._get_month_debris_data(year, query_month)
         result = self._format_month_debris_result(year, query_month, debris_list)
         yield event.plain_result(result)
-    
+
+    @filter.command("测试推送")
+    async def test_push(self, event: AstrMessageEvent):
+        """测试推送功能 - 手动触发碎石和老奶奶提醒"""
+        yield event.plain_result("🔄 正在测试推送功能...")
+
+        # 测试碎石推送
+        if self.push_groups:
+            await self._push_debris_info()
+            yield event.plain_result("✅ 碎石信息已推送到配置的群组")
+        else:
+            yield event.plain_result("❌ 未配置 push_groups")
+
+        # 测试老奶奶提醒
+        if self.push_groups and self.enable_grandma_reminder:
+            await self._push_grandma_reminder()
+            yield event.plain_result("✅ 老奶奶提醒已推送到配置的群组")
+        else:
+            yield event.plain_result("❌ 未配置 push_groups 或老奶奶提醒未启用")
+
     @filter.command("复刻先祖")
     async def traveling_spirit(self, event: AstrMessageEvent):
         """获取复刻先祖信息"""
@@ -1440,12 +1459,13 @@ class SkyPlugin(Star):
                 
                 try:
                     itr = croniter(cron_expr, base_time)
-                    self._cron_iters[task_name] = itr
                     next_time = itr.get_next(datetime)
+                    # 保存迭代器和下次执行时间
+                    self._cron_iters[task_name] = {"itr": itr, "next_time": next_time}
                     logger.info(f"[Cron] {task_name}: {cron_expr} -> 下次执行: {next_time}")
                 except Exception as e:
                     logger.error(f"[Cron] 初始化 {task_name} 失败: {e}")
-            
+
             # 使用 croniter 的调度循环
             await self._croniter_loop()
         else:
@@ -1455,30 +1475,32 @@ class SkyPlugin(Star):
     
     async def _croniter_loop(self):
         """使用 croniter 的精确调度循环"""
-        # 初始化每个任务的下次执行时间
+        # 从 _cron_iters 获取已初始化的迭代器和下次执行时间
         next_exec_times = {}
-        for task_name, itr in self._cron_iters.items():
-            next_exec_times[task_name] = itr.get_next(datetime)
+        for task_name, data in self._cron_iters.items():
+            next_exec_times[task_name] = data["next_time"]
             logger.info(f"[Cron] {task_name} 下次执行: {next_exec_times[task_name]}")
-        
+
         while self._running:
             try:
                 now = self._get_beijing_time()
-                
-                for task_name, itr in list(self._cron_iters.items()):
+
+                for task_name, data in list(self._cron_iters.items()):
                     next_time = next_exec_times.get(task_name)
-                    
+
                     if next_time and now >= next_time:
                         # 更新下次执行时间
+                        itr = data["itr"]
                         next_exec_times[task_name] = itr.get_next(datetime)
+                        data["next_time"] = next_exec_times[task_name]
                         logger.info(f"[Cron] {task_name} 下次执行时间更新为: {next_exec_times[task_name]}")
-                        
+
                         # 检查是否已经执行过（使用分钟级精度去重）
                         exec_key = f"{task_name}_{now.strftime('%Y-%m-%d_%H:%M')}"
                         if exec_key not in self._last_executed:
                             self._last_executed[exec_key] = now.strftime('%Y-%m-%d')
                             logger.info(f"[定时任务触发] {task_name} at {now}")
-                            
+
                             # 执行对应任务
                             if task_name == "daily_task":
                                 self._create_tracked_task(self._push_daily_tasks())
@@ -1488,10 +1510,10 @@ class SkyPlugin(Star):
                                 self._create_tracked_task(self._push_sacrifice_reminder())
                             elif task_name == "debris":
                                 self._create_tracked_task(self._push_debris_info())
-                
+
                 # 睡眠到下一秒，精确检查
                 await asyncio.sleep(1)
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1627,15 +1649,17 @@ class SkyPlugin(Star):
         message += "💡 带上火盆或火把可以自动收集烛火哦~"
         
         logger.info(f"[推送] 开始发送老奶奶提醒到 {len(self.push_groups)} 个群组")
-        
+
         async def send_to_group(group_id: str):
             try:
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
-                await self.context.send_message(unified_msg_origin, message)
+                chain = MessageChain()
+                chain.chain = [Comp.Plain(message)]
+                await self.context.send_message(unified_msg_origin, chain)
                 logger.info(f"[推送] 老奶奶提醒已发送到群组 {group_id}")
             except Exception as e:
                 logger.error(f"[推送] 推送老奶奶提醒到群组 {group_id} 失败: {e}")
-        
+
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("[推送] 老奶奶提醒推送完成")
@@ -1651,15 +1675,17 @@ class SkyPlugin(Star):
         message += "💡 记得去暴风眼献祭获取升华蜡烛~"
         
         logger.info(f"[推送] 开始发送献祭提醒到 {len(self.push_groups)} 个群组")
-        
+
         async def send_to_group(group_id: str):
             try:
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
-                await self.context.send_message(unified_msg_origin, message)
+                chain = MessageChain()
+                chain.chain = [Comp.Plain(message)]
+                await self.context.send_message(unified_msg_origin, chain)
                 logger.info(f"[推送] 献祭提醒已发送到群组 {group_id}")
             except Exception as e:
                 logger.error(f"[推送] 推送献祭提醒到群组 {group_id} 失败: {e}")
-        
+
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("[推送] 献祭提醒推送完成")
@@ -1688,15 +1714,17 @@ class SkyPlugin(Star):
             message += f"💡 完成碎石任务可以获得升华蜡烛奖励~"
         
         logger.info(f"[推送] 开始发送碎石信息到 {len(self.push_groups)} 个群组")
-        
+
         async def send_to_group(group_id: str):
             try:
                 unified_msg_origin = self._build_unified_msg_origin(group_id)
-                await self.context.send_message(unified_msg_origin, message)
+                chain = MessageChain()
+                chain.chain = [Comp.Plain(message)]
+                await self.context.send_message(unified_msg_origin, chain)
                 logger.info(f"[推送] 碎石信息已发送到群组 {group_id}")
             except Exception as e:
                 logger.error(f"[推送] 推送碎石信息到群组 {group_id} 失败: {e}")
-        
+
         tasks = [send_to_group(gid) for gid in self.push_groups]
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("[推送] 碎石信息推送完成")
