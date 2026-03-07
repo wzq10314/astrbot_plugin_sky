@@ -178,7 +178,7 @@ git clone https://github.com/wzq10314/astrbot_plugin_sky
 
 ```
 # 绑定大号
-绑定身高 大号 2c77a366-8669-41f9-b4b2-b5403b6cda02 1TVB-4A6E-Q4HZ
+绑定身高 大号 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx xxxx-xxxx-xxxx
 
 # 绑定小号
 绑定身高 小号 XXXX-XXXX-XXXX-XXXX XXXX-XXXX-XXXX
@@ -200,7 +200,7 @@ git clone https://github.com/wzq10314/astrbot_plugin_sky
 ```
 
 **说明：**
-- **光遇长ID**：游戏内设置 → 账号 → 长ID（格式如：`2c77a366-8669-41f9-b4b2-b5403b6cda02`）
+- **光遇长ID**：游戏内设置 → 账号 → 长ID（格式如：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）
 - **好友码**：游戏内邀请好友的二维码对应的邀请码
 - **备注**：给账号起的名字，如"大号"、"小号"等，方便区分多个账号
 
