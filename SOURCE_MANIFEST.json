@@ -1,0 +1,21 @@
+{
+  "source": "user supplied Tlon-Sky-master.zip",
+  "files": {
+    "[Sky]信息.js": "030c48de8a5a26b26ccacb4df1e4325e99a182db350d67a1e78b6a100add259b",
+    "[Sky]光翼查询.js": "5b845c5d3faa692a3700d493de8156d513eda42867c3a8a937e3bb03aa0e04c4",
+    "[Sky]图鉴.js": "7006552319a7b50456fc4a1026e455c5472143c611ccfc8ce196241b992c95e0",
+    "[Sky]娱乐.js": "c6ded6faaa807b24133ccb8e605ab59b5a48e80237778c15984073bc8fad74e9",
+    "[Sky]攻略.js": "a6834404798c1fc57b32c49c1c439e5441dc26a70bb1a5c250809d0733d9c3c9",
+    "[Sky]日历.js": "e2def5934f74b1dacfe4bae998033fce4c20fe2a75aa89350290cf9dc43bf395",
+    "[Sky]更新.js": "468915aa522e0cf6a54b91284d787b5f9d77a1ff02575e4de36ab642dbb9bc9f",
+    "[Sky]蜡烛记录.js": "0f59242c3c1ed843ed4178988b45c514aaec265ce16918257b60426a30fbd767",
+    "[Sky]身高查询.js": "edfd1383209917d423f5bee7327c1017828ded4b5d8960db788aa8d572ccce5b",
+    "[Task]每日任务推送.js": "df1d38dab988acc0d77e4f7e3d5566ef2c33fc76310d5f629b112cc26784c032",
+    "[Task]献祭刷新提醒.js": "ff04390c98b6522bf0502060e854b9d235d0eaacde9bae8aad0bcb351f989e82",
+    "[Task]碎石提醒.js": "acc2a32e892a5220400bdfb57c33c658b35f0424033ba568e254ce2d94e264d1",
+    "[Task]老奶奶干饭提醒.js": "6c84e31fab26e8dbbe37f14de544d717a337808cca7f4a7298d3ac8f6098db64",
+    "[Tools]下载地址.js": "e4c087fdeff78cad82540d9dd821412a4d9c006810caed66d3eaf3ac17c3e059",
+    "help.js": "417e455b45c5d98c5cd81b86cf7e2923b1d63c0481606638bdfdaa76a2454083",
+    "国服礼包查询.js": "dca9ee043fd06dcdddbaccfa2bff01194ae82169dfd151c31759b25a9a077709"
+  }
+}

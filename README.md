@@ -1,328 +1,140 @@
-# 
-
 <div align="center">
 
+<img src="logo.png" width="120" alt="Tlon-Sky">
 
-# Sky 光遇助手
+# Tlon-Sky · 光遇助手
 
-_✨ 你的光遇游戏小助手 ✨_
+让查询、资产记录和群提醒，在聊天里完成。
 
-[![Plugin Version](https://img.shields.io/badge/Latest_Version-v1.1.0-blue.svg?style=for-the-badge&color=76bad9)](https://github.com/wzq10314/astrbot_plugin_sky)
-[![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-ff69b4?style=for-the-badge)](https://github.com/AstrBotDevs/AstrBot)
-[![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
-[![](https://img.shields.io/badge/在GitHub中查看仓库-white?style=for-the-badge&color=24292e&logo=github)](https://github.com/wzq10314/astrbot_plugin_sky)
+![版本](https://img.shields.io/badge/version-3.0.0-blue)
+![AstrBot](https://img.shields.io/badge/AstrBot-4.28.1%2B-purple)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![平台](https://img.shields.io/badge/OneBot11-NapCat-green)
+![许可证](https://img.shields.io/badge/license-MulanPSL--2.0-orange)
 
-<img src="https://count.getloli.com/@astrbot_plugin_sky?name=astrbot_plugin_sky&theme=booru-jaypee&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="count" />
+[![文档访问](https://visitor-badge.laobi.icu/badge?page_id=wzq10314.astrbot_plugin_sky)](https://github.com/wzq10314/astrbot_plugin_sky)
+[![Stars](https://img.shields.io/github/stars/wzq10314/astrbot_plugin_sky?style=social)](https://github.com/wzq10314/astrbot_plugin_sky/stargazers)
+[![Forks](https://img.shields.io/github/forks/wzq10314/astrbot_plugin_sky?style=social)](https://github.com/wzq10314/astrbot_plugin_sky/forks)
+
+访问徽章为第三方服务请求计数，不是 GitHub 官方独立访客数。
+
 
 </div>
 
-> **🙏 特别致谢**
-> 
-> 本插件使用 AI 工具移植自 [**Tlon-Sky**](https://gitee.com/Tloml-Starry/Tlon-Sky)，感谢原作者 [**Tloml-Starry**](https://gitee.com/Tloml-Starry) 的杰出贡献！
-> 
-> 后续将持续关注并移植原项目的更新内容，为光遇玩家提供更好的服务。
+> 致敬原作者 **[Tloml-Starry](https://gitee.com/Tloml-Starry)**，感谢开源项目 **[Tlon-Sky](https://gitee.com/Tloml-Starry/Tlon-Sky)** 提供的功能设计、资源与移植基础。
+> 本项目借助 AI 工具完成 AstrBot Python 移植与后续适配。这是 [wzq10314/astrbot_plugin_sky](https://github.com/wzq10314/astrbot_plugin_sky) 的 3.0.0 大版本更新，README沿用原仓库的清晰分区，并按当前实现重新编写。
 
----
+## ✨ 可以做什么
 
-## 📦 安装方法
+| 功能 | 当前实现 |
+| --- | --- |
+| 日常攻略 | 每日任务、季蜡、大蜡、魔法、活动货币位置、明日任务 |
+| 红石日历 | 独角兽API月历、定时群推送、坠落前10分钟提醒 |
+| 季节信息 | 季节列表、当前季节结束时间、复刻记录与图鉴 |
+| 光翼与身高 | 绑定账号、光翼查询、身高及接口提供的装扮、身高历史 |
+| 在线资产 | 用个人token查询蜡烛、季蜡、爱心、红蜡和代币变化 |
+| 群提醒 | 每日任务、老奶奶干饭、周日献祭、碎石提醒 |
+| 其他 | 游戏状态、公告、礼包查询、好友盲盒、绘画分享 |
 
-在 AstrBot 插件市场搜索 **sky**，点击安装即可。
+支持 `tlon_sky` LLM 工具。可以说“查活动货币在哪里”“查一下我的蜡烛变化”。模型选择命令可能受旧对话影响，排查时先试直接命令。
 
-或手动安装：
+## 📦 安装与更新
 
-```bash
-# 克隆仓库到插件目录
-cd /AstrBot/data/plugins
-git clone https://github.com/wzq10314/astrbot_plugin_sky
+1. 在 AstrBot 插件管理中使用本仓库地址安装/更新，或上传本项目 ZIP 安装包。
+2. 在插件配置中填写所需 API 密钥，保存并重载。
+3. 发送 `#光遇菜单` 检查加载；发送 `#光遇更新` 查看已加载版本。
 
-# 控制台重启AstrBot
+适配 AstrBot 4.28.1、Python 3.12、OneBot11/NapCat。依赖见 requirements.txt；项目仓库：https://github.com/wzq10314/astrbot_plugin_sky 。从2.5.3升级前请先阅读 [升级说明](UPGRADE.md)。
+
+更新时覆盖插件源码，不要删除 `data/plugin_data/astrbot_plugin_tlon_sky`。更新前停用插件并备份数据目录和插件配置，避免运行中直接复制SQLite造成不完整备份。
+
+## ⚙️ 主要配置
+
+| 配置 | 用途 |
+| --- | --- |
+| `ovoav_api_key` | 独角兽接口密钥，需分别具备所用产品权限 |
+| `t1qq_api_key` | 每日任务、季蜡、大蜡和魔法图片；可选旧礼包来源 |
+| `kevcore_api_key` | 本月日历、可选旧光翼与身高来源 |
+| `height_provider` / `wings_provider` / `gifts_provider` | 默认均为 ovoav；旧来源可在后台选择 |
+| `candle_tokens` | 可选管理员代填的 QQ→token JSON；用户也可私聊自行绑定 |
+| `api_cooldown` | 每人外部查询冷却秒数 |
+| `height_daily_limit` | 每人每天身高请求上限，失败请求也计数 |
+| `report_images` | 本地文本报告是否渲染成图片，不改变API原生图片 |
+| `shard_advance_reminder` | 默认开启，恢复原版红/黑石坠落前10分钟提醒 |
+| `push_at_all` | 默认关闭，开启后需机器人拥有@全体权限 |
+
+密钥由各用户自行申请，本项目不提供原作者的私有密钥。接口费用、权限和可用性以提供方为准。
+
+## 🔑 每个人如何绑定 token
+
+私聊机器人发送：
+
+```text
+#绑定token 完整小精灵链接或token
+#token绑定状态
 ```
 
-依赖（`aiocqhttp`）会由 AstrBot 自动安装。
+也支持“这是我的token：内容”。收到“已保存”只代表本地保存成功，首次查询才提交给独角兽验证绑定。
 
----
+随后可在私聊或群聊发送 `#蜡烛变化查询`，只使用当前发送者的账号。`#解绑token` 只能私聊使用，解除本地绑定，不撤销第三方已有授权。群聊绑定会被拒绝。
 
-## 🤝 这是干嘛用的？
+获取方法可发送 `#光遇token帮助`：第三方教程展示进入小精灵后断网刷新、长按全选复制带token链接的方法，未确认所有游戏版本都支持。当前没有自建扫码授权功能。
 
-这是一个**为光遇(Sky: Children of the Light)玩家打造的智能助手插件**。
+token原文存于插件SQLite，未加密；插件不回显token，但AstrBot核心日志、采集与记忆插件可能先记录原消息，应排除绑定内容。不要把带凭据的日志公开。个人绑定优先于后台配置，解绑后不会回退旧token。
 
-无论你是想了解今日任务、查询光翼收集进度，还是想知道服务器排队情况——只需在 QQ、微信、Telegram 等聊天平台发送一条消息，即可快速获取光遇游戏相关信息。
+## ⌨️ 常用命令
 
-**支持自然语言交互**，直接问"今天光遇有什么任务？"，AI 会自动调用相应功能回复你。
+所有命令可加 `#` 或 `/`。
 
-> **一句话总结**：光遇玩家的随身游戏助手。
+| 分类 | 命令 |
+| --- | --- |
+| 攻略 | 每日任务、季蜡、大蜡烛、今日魔法、季节任务、明日任务 |
+| 活动 | 活动货币位置（也接受活动货币、活动代币点位图） |
+| 红石 | 本月碎石、2026年7月碎石、今日红石 |
+| 季节 | 季节列表、光遇进度、感恩季多久未复刻 |
+| 复刻 | 2026年复刻记录、全部年复刻记录、2026年复刻日历 |
+| 光翼 | 光遇绑定 短ID、光遇ID列表、光遇切换 序号、光遇删除 序号、光翼查询、光翼详情、光翼统计 |
+| 身高 | 光遇绑定好友码 好友码、光遇绑定长ID 长ID、光遇身高查询、光遇历史身高、光遇身高排行榜 |
+| 资产 | 蜡烛变化查询、季节蜡烛查询、爱心变化查询、升华蜡烛查询、点赞爱心查询、魔法变化查询、代币变化查询、我的光遇id |
+| 礼包 | 国服id绑定 好友码、国服id列表、国服id切换 序号、国服id删除 序号、国服礼包查询 |
+| 其他 | 光遇状态、光遇公告、光遇下载、全图鉴参考、光遇本月日历、光遇绘画分享 |
+| 盲盒 | 私聊存入盲盒好友码*国服、随机好友盲盒 |
 
----
+手动蜡烛记账已经删除。“蜡烛记录”只在LLM入口作为旧查询名称转到token查询，不会恢复写入旧账本。资产变化记录不保证等于即时余额。
 
-## 💡 功能特色
+## ⏰ 群推送与提前提醒
 
-### 🎯 智能查询
-- **每日任务**：自动获取今日每日任务图片
-- **蜡烛位置**：季节蜡烛、大蜡烛位置一键查询
-- **免费魔法**：每日免费魔法信息
-- **季节进度**：当前季节剩余时间、毕业所需天数
-- **碎石信息**：今日碎石位置、类型、坠落时间
-- **复刻先祖**：当前复刻先祖信息
-- **献祭信息**：献祭刷新时间、奖励说明
-- **老奶奶时间**：雨林老奶奶用餐时间表
-- **服务器状态**：光遇服务器排队状态监控
+由群主、群管理员或 AstrBot 管理员在**目标群**发送：
 
-### 🪽 光翼追踪
-- **ID 绑定**：绑定游戏内短ID
-- **进度查询**：查询指定ID的光翼收集情况
-- **全图统计**：查看全图光翼分布统计
-
-### 📏 身高查询
-- **多账号绑定**：支持绑定多个光遇账号
-- **备注管理**：为每个账号设置备注名，方便区分
-- **快速查询**：通过备注快速查询指定账号身高
-- **完整数据**：体型值、身高值、评分、装扮、动作等
-
-### 🤖 自然语言交互
-- **LLM 工具集成**：支持通过自然语言触发查询
-- **无需记忆指令**：直接说话即可查询
-
-### ⏰ 定时推送
-- **每日任务**：定时推送任务图片
-- **老奶奶提醒**：用餐时间自动提醒
-- **献祭提醒**：每周六刷新提醒
-- **碎石提醒**：每日碎石位置提醒
-
----
-
-## ⚙️ 配置
-
-安装后在 AstrBot 管理面板的插件配置页填写：
-
-![WebUI 配置界面](webui_preview.png)
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `sky_api_key` | 光遇API密钥（用于获取任务/蜡烛图片） | - |
-| `wing_query_key` | 光翼查询API密钥 | - |
-| `height_query_key` | 身高查询API密钥 | - |
-| `llm_provider_id` | LLM Provider ID（用于自然语言交互） | 空 |
-| `enable_daily_task_push` | 启用每日任务推送 | true |
-| `daily_task_push_time` | 每日任务推送时间（HH:MM） | 08:00 |
-| `push_groups` | 推送群组列表（UMO格式） | [] |
-| `enable_grandma_reminder` | 启用老奶奶干饭提醒 | true |
-| `enable_sacrifice_reminder` | 启用献祭刷新提醒 | true |
-| `enable_debris_reminder` | 启用碎石提醒 | true |
-| `api_timeout` | API请求超时时间（秒） | 10 |
-| `cache_duration` | 数据缓存时间（分钟） | 30 |
-
-> [!NOTE]
-> 以上配置情况仅供参考，请仔细阅读插件配置页面中各个字段的说明，以插件配置中的说明为准。
-
-> [!TIP]
-> **推送群组格式**：UMO 格式，如 `aiocqhttp:GroupMessage:123456`
-
----
-
-## 🖼️ 效果展示
-
-<table align="center" width="100%">
-  <tr>
-    <td align="center" width="50%" valign="top">
-      <p><b>每日任务</b></p>
-      <img src="https://api.t1qq.com/api/sky/sc/scrw?key=qw36BL4Oiq8Kmpefl3bkpIs5IY&num=1" alt="每日任务" width="100%">
-    </td>
-    <td align="center" width="50%" valign="top">
-      <p><b>季节蜡烛</b></p>
-      <img src="https://api.t1qq.com/api/sky/sc/scjl?key=qw36BL4Oiq8Kmpefl3bkpIs5IY&num=1" alt="季节蜡烛" width="100%">
-    </td>
-  </tr>
-</table>
-
----
-
-## ⌨️ 指令大全
-
-### 📋 信息查询
-
-| 指令 | 说明 |
-|------|------|
-| `每日任务` | 获取今日每日任务图片 |
-| `季节蜡烛` | 获取季节蜡烛位置图片 |
-| `大蜡烛` | 获取大蜡烛位置图片 |
-| `免费魔法` | 获取今日免费魔法图片 |
-| `季节进度` | 查看当前季节进度和剩余时间 |
-| `碎石信息` | 查看今日碎石位置和类型 |
-| `复刻先祖` | 查看当前复刻先祖信息 |
-| `献祭信息` | 查看献祭刷新时间和奖励 |
-| `老奶奶时间` | 查看老奶奶用餐时间表 |
-| `光遇状态` | 查看光遇服务器排队状态 |
-
-### 🪽 光翼查询
-
-| 指令 | 说明 |
-|------|------|
-| `光遇绑定 <ID>` | 绑定光遇游戏内短ID |
-| `光遇切换 <序号>` | 切换当前绑定的ID |
-| `光遇删除 <序号>` | 删除绑定的ID |
-| `光遇ID列表` | 查看所有绑定的ID |
-| `光翼查询` | 查询当前ID的光翼收集情况 |
-| `光翼查询 <ID>` | 查询指定ID的光翼 |
-| `光翼统计` | 查看全图光翼统计 |
-
-### 📏 身高查询
-
-| 指令 | 说明 |
-|------|------|
-| `绑定身高 <备注> <光遇长ID> <好友码>` | 绑定身高查询信息 |
-| `身高查询 [备注]` | 查询指定账号的身高 |
-| `身高列表` | 列出所有绑定的账号 |
-| `身高解绑 [备注]` | 解除身高信息绑定 |
-
-**身高查询使用示例：**
-
-```
-# 绑定大号
-绑定身高 大号 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx xxxx-xxxx-xxxx
-
-# 绑定小号
-绑定身高 小号 XXXX-XXXX-XXXX-XXXX XXXX-XXXX-XXXX
-
-# 查询大号身高
-身高查询 大号
-
-# 查询小号身高
-身高查询 小号
-
-# 查看所有绑定的账号
-身高列表
-
-# 解绑小号
-身高解绑 小号
-
-# 解绑所有账号
-身高解绑
+```text
+#开启每日任务推送
+#开启老奶奶干饭提醒
+#开启献祭刷新提醒
+#开启碎石提醒
+#光遇推送状态
 ```
 
-**说明：**
-- **光遇长ID**：游戏内设置 → 账号 → 长ID（格式如：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）
-- **好友码**：游戏内邀请好友的二维码对应的邀请码
-- **备注**：给账号起的名字，如"大号"、"小号"等，方便区分多个账号
+将“开启”改为“关闭”即可取消。每个群独立订阅，不必填写群号；多群分别开启。订阅重载后保留。
 
-### 🌟 其他
+- 时间均为北京时间，后台 `daily_times`、`grandma_times`、`sacrifice_times`、`shard_times` 接受逗号分隔的 HH:MM。
+- 献祭提醒只在周日执行。每日任务图片需要t1qq权限。
+- 碎石定时推送调用独角兽172月历；`今日红石`也返回本月日历供查看当天，并非每日详情接口。
+- **提前10分钟提醒已恢复**：只有开启碎石订阅的群才接收，`shard_advance_reminder=false` 可全局关闭。原版时刻表同时包括红石和黑石。
+- **提醒时刻来自内置表，并非API核验**：172只提供月历，没有可读取的逐次坠落时刻。消息会注明此限制；不会从图片猜时间，也没有恢复本地地图或月历推算。
+- 按分钟去重；离线错过不补发，发送结果不确定不自动重发。旧 `shard_image` 配置不再使用。
 
-| 指令 | 说明 |
-|------|------|
-| `光遇菜单` | 显示完整菜单 |
+## 🌐 数据来源与边界
 
----
+独角兽文档：[身高144](https://www.ovoav.com/doc/144) · [光翼184](https://www.ovoav.com/doc/184) · [礼包169](https://www.ovoav.com/doc/169) · [资产174](https://www.ovoav.com/doc/174) · [季节180](https://www.ovoav.com/doc/180) · [进度15](https://www.ovoav.com/doc/15) · [活动货币22](https://www.ovoav.com/doc/22) · [明日任务178](https://www.ovoav.com/doc/178) · [红石月历172](https://www.ovoav.com/doc/172)。
 
-## 🗣️ 自然语言交互
+进度接口只提供季节结束时间；明日任务按北京时间日期筛选，缺少明天数据会明确提示。部分图片接口无返回示例，已兼容图片和常见JSON地址结构，不能保证未来格式不变。礼包曾返回“国服更改礼包接口”，尚不能确认已恢复。其他复刻、图鉴仍使用原项目公开资源源。
 
-本插件支持通过 LLM 自然语言触发，无需记忆指令：
+回归测试使用Python、SQLite、Pillow及模拟的API/QQ事件；没有连接用户的AstrBot验证真实付费查询或长期推送。报告问题请提供已加载版本、命令、脱敏后的工具参数和错误结果。
 
-| 你说 | 插件响应 |
-|------|---------|
-| "今天光遇有什么任务？" | 自动调用 `get_sky_daily_tasks` 返回任务图片 |
-| "季节蜡烛在哪里？" | 自动调用 `get_sky_season_candles` 返回蜡烛位置 |
-| "光遇服务器状态怎么样？" | 自动调用 `get_sky_server_status` 返回排队信息 |
-| "老奶奶什么时候开饭？" | 自动调用 `get_sky_grandma_schedule` 返回时间表 |
-| "现在是什么季节？" | 自动调用 `get_sky_season_progress` 返回季节进度 |
-| "光翼有多少个？" | 自动调用 `get_sky_wing_count` 返回光翼统计 |
-| "查询大号身高" | 自动调用 `query_height` 返回身高数据 |
+## 🙏 致谢与许可证
 
----
+- [Tloml-Starry / Tlon-Sky](https://gitee.com/Tloml-Starry/Tlon-Sky)：原始项目、功能设计及资源，感谢原作者的持续分享。
+- [wzq10314](https://github.com/wzq10314)：AstrBot移植仓库维护。
+- AstrBot、NapCat、独角兽API，以及原项目使用的网易与Kevin1217资源维护者。
 
-## 📁 插件结构
-
-```
-astrbot_plugin_sky/
-├── main.py              # 插件入口：指令处理、LLM工具、定时任务
-├── _conf_schema.json    # 配置 schema（WebUI配置界面）
-├── metadata.yaml        # 插件元信息
-├── logo.png             # 插件Logo
-├── webui_preview.png    # WebUI预览图
-└── data/                # 数据存储目录
-    └── sky_bindings/    # 光遇ID绑定数据、身高查询数据
-```
-
----
-
-## 📌 功能清单
-
-- ✅ 每日任务图片查询
-- ✅ 季节蜡烛位置查询
-- ✅ 大蜡烛位置查询
-- ✅ 免费魔法查询
-- ✅ 季节进度查询
-- ✅ 碎石信息查询
-- ✅ 复刻先祖查询
-- ✅ 献祭信息查询
-- ✅ 老奶奶用餐时间查询
-- ✅ 光遇服务器状态查询
-- ✅ 光翼收集进度查询（需绑定ID）
-- ✅ 全图光翼统计
-- ✅ 光遇ID绑定管理
-- ✅ **身高查询（支持多账号）**
-- ✅ 定时推送提醒（任务、老奶奶、献祭、碎石）
-- ✅ 自然语言交互（LLM工具）
-- ✅ WebUI配置界面
-
----
-
-## 📝 更新日志
-
-### v2.5.0
-- ✨ 新增身高查询功能
-- ✨ 支持绑定多个光遇账号
-- ✨ 支持为账号设置备注名
-- ✨ 通过备注快速查询指定账号
-
-### v1.0.0
-- 🎉 初始版本发布
-- 每日任务、蜡烛位置、免费魔法查询
-- 季节进度、碎石信息、复刻先祖查询
-- 献祭信息、老奶奶时间、服务器状态
-- 光翼追踪、ID绑定管理
-- 定时推送提醒
-- 自然语言交互
-
----
-
-## 🙏 致谢
-
-- [**Tlon-Sky**](https://gitee.com/Tloml-Starry/Tlon-Sky) — 本插件功能原型来源，感谢原作者 [**Tloml-Starry**](https://gitee.com/Tloml-Starry) 的杰出贡献
-- [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) — 跨平台聊天机器人框架
-- 光遇数据 API 由社区提供支持
-
----
-
-## 👥 贡献指南
-
-- 🌟 Star 本项目
-- 🐛 提交 Issue 报告问题
-- 💡 提出新功能建议
-- 🔧 提交 Pull Request 改进代码
-
----
-
-## Star History
-
-<a href="https://www.star-history.com/#AstrBot-Devs/astrbot_plugin_sky&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=AstrBot-Devs/astrbot_plugin_sky&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=AstrBot-Devs/astrbot_plugin_sky&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=AstrBot-Devs/astrbot_plugin_sky&type=date&legend=top-left" />
- </picture>
-</a>
-
----
-
-## 📄 许可证
-
-MIT License
-
-欢迎提交 Issue 和 Pull Request 来改进这个插件！
-
----
-
-<div align="center">
-
-**Made with ❤️ for Sky Players**
-
-</div>
+采用 **Mulan PSL v2**，见 [LICENSE](LICENSE)。资源署名和第三方权利说明见 [NOTICE.md](NOTICE.md)，功能移植对应见 [功能对照.md](功能对照.md)。不是光遇、网易或API平台的官方产品，也不暗示原作者为本移植版提供支持。

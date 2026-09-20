@@ -1,78 +1,148 @@
 {
-  "sky_api_key": {
+  "candle_tokens": {
+    "description": "仅后台填写：JSON对象，将QQ号对应到自己的小精灵完整链接或token；首次查询提交给独角兽，勿在聊天发送",
     "type": "string",
-    "description": "光遇API密钥（用于获取任务/蜡烛图片）",
-    "default": "qw36BL4Oiq8Kmpefl3bkpIs5IY",
-    "hint": "光遇数据API密钥，用于获取每日任务、季节蜡烛、大蜡烛等图片"
+    "default": "{}",
+    "secret": true
   },
-  "wing_query_key": {
-    "type": "string",
-    "description": "光翼查询API密钥",
-    "default": "IIoAMkBC5c5zl",
-    "hint": "光翼查询API密钥，用于查询玩家光翼收集进度"
-  },
-  "llm_provider_id": {
-    "type": "string",
-    "description": "LLM Provider ID（用于自然语言交互）",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "选择用于光遇插件自然语言交互的 LLM Provider。留空则使用当前会话的默认 Provider"
-  },
-  "enable_daily_task_push": {
-    "type": "bool",
-    "description": "启用每日任务推送",
-    "default": true,
-    "hint": "是否每天自动推送光遇每日任务图片"
-  },
-  "daily_task_push_time": {
-    "type": "string",
-    "description": "每日任务推送时间",
-    "default": "08:00",
-    "hint": "每日任务自动推送的时间，格式：HH:MM"
-  },
-  "push_groups": {
+  "admins": {
+    "description": "额外管理员QQ号列表（字符串）",
     "type": "list",
-    "description": "推送群组列表",
-    "default": [],
-    "hint": "需要接收定时推送的群组ID列表（UMO格式，如 aiocqhttp:GroupMessage:123456）",
-    "items": {
-      "type": "string"
-    }
+    "default": []
   },
-  "enable_grandma_reminder": {
-    "type": "bool",
-    "description": "启用老奶奶干饭提醒",
-    "default": true,
-    "hint": "是否在老奶奶用餐时间发送提醒"
-  },
-  "enable_sacrifice_reminder": {
-    "type": "bool",
-    "description": "启用献祭刷新提醒",
-    "default": true,
-    "hint": "是否在献祭刷新时发送提醒"
-  },
-  "enable_debris_reminder": {
-    "type": "bool",
-    "description": "启用碎石提醒",
-    "default": true,
-    "hint": "是否提醒每日碎石位置"
-  },
-  "api_timeout": {
-    "type": "int",
-    "description": "API请求超时时间（秒）",
-    "default": 10,
-    "hint": "请求光遇数据API的超时时间"
-  },
-  "cache_duration": {
-    "type": "int",
-    "description": "数据缓存时间（分钟）",
-    "default": 30,
-    "hint": "光遇数据的缓存时间"
-  },
-  "height_query_key": {
+  "kevcore_api_key": {
+    "description": "KevCore密钥：光翼、本月日历、可选身高查询",
     "type": "string",
-    "description": "身高查询API密钥",
     "default": "",
-    "hint": "用于查询光遇身高的API密钥"
+    "secret": true
+  },
+  "ovoav_api_key": {
+    "description": "独角兽密钥：身高、光翼、礼包、资产174、季节180/15、货币22、明日任务178；需各接口权限",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "t1qq_api_key": {
+    "description": "t1qq密钥：任务图片和国服礼包，需相应权限",
+    "type": "string",
+    "default": "",
+    "secret": true
+  },
+  "height_provider": {
+    "description": "身高来源：ovoav（独角兽）或kevcore（原版）",
+    "type": "string",
+    "default": "ovoav",
+    "options": [
+      "ovoav",
+      "kevcore"
+    ]
+  },
+  "api_cooldown": {
+    "description": "每人外部查询间隔秒数，默认30",
+    "type": "int",
+    "default": 30
+  },
+  "height_daily_limit": {
+    "description": "每人每天身高请求上限，失败请求也计数",
+    "type": "int",
+    "default": 10
+  },
+  "wings_provider": {
+    "description": "光翼来源：ovoav图片版（默认）或kevcore旧版",
+    "type": "string",
+    "default": "ovoav",
+    "options": [
+      "ovoav",
+      "kevcore"
+    ]
+  },
+  "gifts_provider": {
+    "description": "礼包来源：ovoav好友码（默认）或t1qq长ID",
+    "type": "string",
+    "default": "ovoav",
+    "options": [
+      "ovoav",
+      "t1qq"
+    ]
+  },
+  "request_timeout": {
+    "description": "单次HTTP超时秒数",
+    "type": "int",
+    "default": 40
+  },
+  "report_images": {
+    "description": "将数据渲染为本地图片；关闭则发送文本",
+    "type": "bool",
+    "default": true
+  },
+  "push_at_all": {
+    "description": "推送时@全体，机器人需有权限",
+    "type": "bool",
+    "default": false
+  },
+  "daily_times": {
+    "description": "每日任务提醒时间，北京时间HH:MM，多个用英文逗号分隔",
+    "type": "string",
+    "default": "01:00,06:00,12:00,18:00"
+  },
+  "grandma_times": {
+    "description": "老奶奶干饭提醒时间，北京时间HH:MM，多个用英文逗号分隔",
+    "type": "string",
+    "default": "07:55,09:55,11:55,15:55,17:55,19:55,21:55"
+  },
+  "sacrifice_times": {
+    "description": "周日献祭提醒时间，北京时间HH:MM，多个用英文逗号分隔",
+    "type": "string",
+    "default": "00:00,04:00,08:00,12:00,16:00,20:00"
+  },
+  "shard_times": {
+    "description": "每天推送独角兽红石月历的北京时间HH:MM；提前提醒由 shard_advance_reminder 单独控制",
+    "type": "string",
+    "default": "00:01"
+  },
+  "shard_advance_reminder": {
+    "description": "恢复原版坠落前10分钟提醒（红/黑石）；仅限已开启碎石提醒的群，按内置时刻表，非API核验",
+    "type": "bool",
+    "default": true
+  },
+  "daily_text": {
+    "description": "每日任务推送文字",
+    "type": "string",
+    "default": "每日任务自动推送"
+  },
+  "grandma_text": {
+    "description": "老奶奶干饭推送文字",
+    "type": "string",
+    "default": "老奶奶干饭提醒：还有五分钟开始啦！"
+  },
+  "sacrifice_text": {
+    "description": "周日献祭推送文字",
+    "type": "string",
+    "default": "每周献祭已刷新！"
+  },
+  "shard_text": {
+    "description": "碎石推送文字",
+    "type": "string",
+    "default": "碎石提醒"
+  },
+  "daily_image": {
+    "description": "每日任务可选推送图片公网URL，留空不发；每日任务留空走任务图片接口",
+    "type": "string",
+    "default": ""
+  },
+  "grandma_image": {
+    "description": "老奶奶干饭可选推送图片公网URL，留空不发；每日任务留空走任务图片接口",
+    "type": "string",
+    "default": ""
+  },
+  "sacrifice_image": {
+    "description": "周日献祭可选推送图片公网URL，留空不发；每日任务留空走任务图片接口",
+    "type": "string",
+    "default": ""
+  },
+  "shard_image": {
+    "description": "旧配置已停用；红石推送直接使用独角兽172月历",
+    "type": "string",
+    "default": ""
   }
 }
