@@ -6,7 +6,7 @@
 
 让查询、资产记录和群提醒，在聊天里完成。
 
-![版本](https://img.shields.io/badge/version-3.0.0-blue)
+![版本](https://img.shields.io/badge/version-3.0.1-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-4.28.1%2B-purple)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![平台](https://img.shields.io/badge/OneBot11-NapCat-green)
@@ -25,6 +25,12 @@
 > 本项目借助 AI 工具完成 AstrBot Python 移植与后续适配。这是 [wzq10314/astrbot_plugin_sky](https://github.com/wzq10314/astrbot_plugin_sky) 的 3.0.0 大版本更新，README沿用原仓库的清晰分区，并按当前实现重新编写。
 
 ## ✨ 可以做什么
+
+### 3.0.1 图片样式更新
+
+本地报告采用暮色云海、暖金微光和半透明卡片。身高报告突出当前身高，分区展示测量数值与角色装扮；其他文字报告统一样式并自动分页。继续使用 Pillow 和内置中文字体，无需浏览器或在线字体。上游直接返回的攻略图片保持原样。开启 `report_images` 即可使用，关闭时仍发送文字。
+
+![身高报告样式示例（示例数据）](assets/height-preview.png)
 
 | 功能 | 当前实现 |
 | --- | --- |

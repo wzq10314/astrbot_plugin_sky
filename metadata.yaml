@@ -1,7 +1,7 @@
 name: astrbot_plugin_sky
 display_name: Tlon-Sky 光遇
 desc: 光遇攻略、光翼、身高、礼包、资产查询、好友盲盒与群提醒
-version: v3.0.0
+version: v3.0.1
 author: wzq10314
 repo: https://github.com/wzq10314/astrbot_plugin_sky
 support_platforms:

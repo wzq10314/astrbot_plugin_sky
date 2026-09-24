@@ -18,7 +18,7 @@ from .core import Store, SkyError, now, pretty, due_jobs
 from .network import HTTP, IMAGES
 from .rendering import cards
 
-VERSION = '3.0.0'
+VERSION = '3.0.1'
 HELP = '''Tlon-Sky 光遇菜单
 【攻略】
 明日任务 / 活动货币位置 / 每日任务 / 今日魔法 / 季蜡 / 大蜡烛 / 任务图 / 季节任务
