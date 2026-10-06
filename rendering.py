@@ -2,6 +2,7 @@
 import io
 import math
 import random
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -174,22 +175,52 @@ def height_card(value):
     return finish(image,1,1)
 
 
-def cards(title, value):
+def readable_asset_answer(value):
+    """Separate sections and flattened table rows, retaining all answer text."""
+    from .currency_report import plain_answer
+    value = plain_answer(value)
+    value = re.sub(r'\s*(?=(?:温馨提示|查询提示|详情如下|明细如下|变动记录如下)\s*[：:])', '\n\n', value)
+    heading = re.search(r'时间[\s|]+(?:原因|变化原因)[\s|]+(?:(?:变化前数量|变化前)[\s|]+)?(?:变化数量|变化量|变动数量)[\s|]+(?:变化后数量|变化后|魔法名称)', value)
+    stamp = r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?'
+    if heading:
+        before = value[:heading.start()].rstrip()
+        table_header = ' | '.join(re.split(r'[\s|]+', heading.group()))
+        body = re.sub(r'\s*(?=' + stamp + ')', '\n', value[heading.end():]).strip()
+        value = before + '\n\n' + table_header + '\n' + body
+    else:
+        detail = re.search(r'(?:详情如下|明细如下|变动记录如下)\s*[：:]', value)
+        if detail:
+            value = value[:detail.end()] + re.sub(r'\s*(?=' + stamp + ')', '\n', value[detail.end():])
+    return value.strip()
+
+
+def cards(title, value, *, single_page=False):
+    """Render complete reports; single_page keeps help on one full-height canvas."""
+    from .currency_report import ASSETS, parse_currency_report
+    report = parse_currency_report(str(title), str(value))
+    if report is not None:
+        from .currency_rendering import ledger_cards
+        result = ledger_cards(str(title), report)
+        if result is not None:
+            return result
+    if str(title) in ASSETS:
+        value = readable_asset_answer(value)
     if str(title)=='光遇身高':
         result = height_card(value)
         if result is not None:
             return [result]
     lines = wrap(value,27,820)
     extra = (len(wrap(title,48,880))-1)*58
-    total = math.ceil(len(lines)/31)
+    line_limit = len(lines) if single_page else 31
+    total = math.ceil(len(lines)/line_limit)
     results = []
-    for start in range(0,len(lines),31):
-        page = lines[start:start+31]
+    for start in range(0,len(lines),line_limit):
+        page = lines[start:start+line_limit]
         image = backdrop(max(590,342+len(page)*44+extra)).copy()
         header(image,str(title),'光遇旅途  ·  查询报告')
         panel(image,(48,216+extra,952,image.height-97))
         draw = ImageDraw.Draw(image)
         for i,line in enumerate(page):
             text(draw,(82,244+extra+i*44),line,27)
-        results.append(finish(image,start//31+1,total))
+        results.append(finish(image,start//line_limit+1,total))
     return results

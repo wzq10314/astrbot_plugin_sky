@@ -6,10 +6,11 @@
 
 让查询、资产记录和群提醒，在聊天里完成。
 
-![版本](https://img.shields.io/badge/version-3.0.1-blue)
+![版本](https://img.shields.io/badge/version-3.0.6-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-4.28.1%2B-purple)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![平台](https://img.shields.io/badge/OneBot11-NapCat-green)
+![QQ官方](https://img.shields.io/badge/QQ官方-群聊%20%2F%20C2C-blue)
 ![许可证](https://img.shields.io/badge/license-MulanPSL--2.0-orange)
 
 [![文档访问](https://visitor-badge.laobi.icu/badge?page_id=wzq10314.astrbot_plugin_sky)](https://github.com/wzq10314/astrbot_plugin_sky)
@@ -22,9 +23,13 @@
 </div>
 
 > 致敬原作者 **[Tloml-Starry](https://gitee.com/Tloml-Starry)**，感谢开源项目 **[Tlon-Sky](https://gitee.com/Tloml-Starry/Tlon-Sky)** 提供的功能设计、资源与移植基础。
-> 本项目借助 AI 工具完成 AstrBot Python 移植与后续适配。这是 [wzq10314/astrbot_plugin_sky](https://github.com/wzq10314/astrbot_plugin_sky) 的 3.0.0 大版本更新，README沿用原仓库的清晰分区，并按当前实现重新编写。
+> 本项目借助 AI 工具完成 AstrBot Python 移植与后续适配。当前版本为 [wzq10314/astrbot_plugin_sky](https://github.com/wzq10314/astrbot_plugin_sky) v3.0.6。
 
 ## ✨ 可以做什么
+
+支持 OneBot11/NapCat，以及 `qq_official`、`qq_official_webhook` 的群聊和 C2C 私聊。官方平台按平台、机器人和发送者隔离个人绑定；图片通过 AstrBot 官方发送能力投递，可配合 `astrbot_plugin_official_cards` 展示图文菜单。长图片会分页处理，主动群提醒仍受平台权限和额度限制。
+
+v3.0.6 增加资产变化报告和官方平台图片投递适配。资产余额与汇总采用接口返回值，历史记录可能只是有限样本，插件不会用样本推算完整余额。个人 token 只能由用户私聊绑定或解绑；群订阅继续要求当前群授权，QQ 官方无法提供群角色时需由 AstrBot 管理员操作。
 
 ### 3.0.1 图片样式更新
 

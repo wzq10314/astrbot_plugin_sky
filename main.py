@@ -17,8 +17,10 @@ from .configuration import load
 from .core import Store, SkyError, now, pretty, due_jobs
 from .network import HTTP, IMAGES
 from .rendering import cards
+from .image_delivery import official_image_pages
+from .platform_support import SUPPORTED_PLATFORMS, OFFICIAL_PLATFORMS, owner_key, card_hint
 
-VERSION = '3.0.1'
+VERSION = '3.0.6'
 HELP = '''Tlon-Sky 光遇菜单
 【攻略】
 明日任务 / 活动货币位置 / 每日任务 / 今日魔法 / 季蜡 / 大蜡烛 / 任务图 / 季节任务
@@ -101,14 +103,35 @@ class TlonSky(Star):
 
     async def emit_image(self, event, content):
         # Base64 works even when AstrBot and NapCat have separate filesystems.
-        encoded = base64.b64encode(content).decode('ascii')
-        await event.send(event.chain_result([Comp.Image.fromBase64(encoded)]))
+        if event.get_platform_name() in OFFICIAL_PLATFORMS:
+            pages = await asyncio.to_thread(official_image_pages, content)
+        else:
+            pages = (content,)
+        if len(pages) == 1:
+            encoded = base64.b64encode(pages[0]).decode('ascii')
+            await event.send(event.chain_result([Comp.Image.fromBase64(encoded)]))
+            return
+        absent = object()
+        previous = event.get_extra('qq_official_card', absent)
+        hint = dict(previous) if isinstance(previous, dict) else {'family': 'sky'}
+        title = str(hint.get('title') or '光遇')
+        try:
+            for index, image in enumerate(pages, 1):
+                event.set_extra('qq_official_card', {**hint, 'title': f'{title} · 第{index}/{len(pages)}页'})
+                encoded = base64.b64encode(image).decode('ascii')
+                await event.send(event.chain_result([Comp.Image.fromBase64(encoded)]))
+        finally:
+            if previous is absent:
+                event.get_extra().pop('qq_official_card', None)
+            else:
+                event.set_extra('qq_official_card', previous)
 
     async def report(self, event, title, text):
+        card_hint(event, title)
         if isinstance(event, ToolEvent):
             event.reports.append(title+'\n'+text)
-        if self.config['report_images']:
-            images = await asyncio.to_thread(cards, title, text)
+        if self.config['report_images'] or title == '光遇菜单':
+            images = await asyncio.to_thread(cards, title, text, single_page=True) if title == '光遇菜单' else await asyncio.to_thread(cards, title, text)
             for image in images:
                 await self.emit_image(event,image)
         else:
@@ -147,8 +170,9 @@ class TlonSky(Star):
         Args:
             command(string): 单条规范插件命令，不是自然语言原句；不带#前缀。例如：每日任务、光遇身高查询、蜡烛变化查询、开启碎石提醒。只使用用户提供的参数。
         """
-        if event.get_platform_name() != 'aiocqhttp':
-            return '未执行：此光遇插件仅支持 OneBot11/NapCat。'
+        if event.get_platform_name() not in SUPPORTED_PLATFORMS:
+            return '未执行：此光遇插件支持 OneBot11/NapCat 和 QQ 官方机器人。'
+        card_hint(event)
         if not isinstance(command, str) or len(command) > 256 or '\n' in command or '\r' in command:
             return '未执行：需要单条光遇命令，长度不能超过256字符。'
         command = normalize_activity(command.strip().lstrip('#/').strip())
@@ -176,7 +200,7 @@ class TlonSky(Star):
             task = asyncio.current_task()
             self.running.add(task)
             try:
-                owner = str(event.get_platform_id())+':'+str(event.get_sender_id())
+                owner = owner_key(event)
                 async with asyncio.timeout(180):
                     await self.dispatch(proxy,owner,command)
                 summary = '\n'.join(proxy.reports or proxy.texts)
@@ -201,12 +225,13 @@ class TlonSky(Star):
 
     @filter.regex(PATTERN)
     async def command(self, event: AstrMessageEvent):
-        if event.get_platform_name() != 'aiocqhttp':
+        if event.get_platform_name() not in SUPPORTED_PLATFORMS:
             return
+        card_hint(event)
         if str(event.get_sender_id()) == str(getattr(event.message_obj,'self_id','')):
             return
         command = normalize_activity(event.get_message_str().strip().lstrip('#/').strip())
-        owner = str(event.get_platform_id()) + ':' + str(event.get_sender_id())
+        owner = owner_key(event)
         if self.work_lock.locked():
             await self.emit_text(event,'正在处理其他光遇请求，请稍后重试。')
             event.stop_event()

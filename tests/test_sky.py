@@ -339,11 +339,23 @@ class Tests(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_direct_send_not_interrupted(self):
         plugin = self.plugin()
         event = Event('#光遇菜单')
-        await plugin.command(event)
-        self.assertIn('光遇菜单',event.sent[0])
-        self.assertTrue(event.stopped)
-        self.assertFalse(plugin.running)
-        await plugin.terminate()
+        try:
+            await plugin.command(event)
+            self.assertTrue(event.sent)
+            images = [part for chain in event.sent for part in chain
+                      if isinstance(part, dict) and 'base64' in part]
+            self.assertTrue(images, 'Help should deliver an image, not the old text menu')
+            import base64
+            from PIL import Image
+            for part in images:
+                with Image.open(io.BytesIO(base64.b64decode(part['base64']))) as image:
+                    image.load()
+                    self.assertGreater(image.width, 0)
+                    self.assertGreater(image.height, 0)
+            self.assertTrue(event.stopped)
+            self.assertFalse(plugin.running)
+        finally:
+            await plugin.terminate()
 
     async def test_subscription_permission_and_persistence(self):
         plugin = self.plugin()
